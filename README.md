@@ -47,8 +47,11 @@ Then approve the plugin's session hook once in `/hooks`.
 git clone https://github.com/Juraj-Sulimanovic/agent-loop ~/.cursor/plugins/local/agent-loop
 ```
 
-Restart Cursor (or the `cursor-agent` CLI). A team can add the repository to a private Cursor
-plugin marketplace instead. The session hook does not run in Cursor's cloud agents.
+Then reload Cursor (**Developer: Reload Window**) and check the plugin under **Customize**. It
+must be a real folder there; a symlink to elsewhere does not load. On Enterprise plans an admin
+first enables **Allow Local Plugin Imports**. A team can instead import the repository as a team
+marketplace (**Dashboard → Plugins & MCPs → Team Marketplaces → Import from Repo**; not yet tried
+with this plugin). The session hook does not run in Cursor's cloud agents.
 
 The loop drives the tools headless, so the ones you use need to be installed and logged in:
 `claude`, `codex` (`codex login`) and `cursor-agent` (`cursor-agent login`). `doctor` checks
