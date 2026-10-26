@@ -259,7 +259,7 @@ def resolve(state_dir: Path, ids: list[str]) -> list[dict]:
 # --- rendering ------------------------------------------------------------------------
 
 def index_line(it: dict) -> str:
-    flag = "" if it.get("status") == "distilled" else " [not yet distilled into requirements]"
+    flag = "" if it.get("status") == "distilled" else " [not yet distilled]"
     summary = it.get("summary") or "(no summary yet)"
     use = f" Use for: {it['useFor']}" if it.get("useFor") else ""
     return f"- `{it['id']}` ({it['kind']}, {it['date']}, {len(it['files'])} file(s)) **{it['title']}**: {summary}{use}{flag}"

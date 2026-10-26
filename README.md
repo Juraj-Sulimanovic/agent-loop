@@ -5,9 +5,9 @@ agents: re-explaining the project to every new session, and carrying one agent's
 the next.
 
 - **Every session starts briefed.** A session-start hook injects the board (the Ready column
-  with each ticket's readiness, In Progress, Review…), the sprint goal, the client
-  requirements, open and recently merged PRs, local worktrees, and the handoff notes earlier
-  agents left behind.
+  with each ticket's readiness, In Progress, Review…), the sprint goal, the decisions log, the
+  project knowledge index, open and recently merged PRs, local worktrees, and the handoff notes
+  earlier agents left behind.
 - **One command runs the loop.** The sprint skill takes every ready ticket, plans each in its own
   worktree, keeps tickets that touch the same files apart, then runs implement → independent
   review → fix (up to N rounds) per ticket in parallel, and writes a handoff note. It runs in the
@@ -76,12 +76,14 @@ Credentials stay in the environment, never in a file:
 | Jira | `JIRA_EMAIL`, `JIRA_API_TOKEN` (an Atlassian API token) |
 | File | nothing: `tickets.json` in the agent-loop folder, a list of `{id, name, status, desc, labels, blockers}` |
 
-Then fill in the two files the brief quotes in every session: `sprint.md` (goal, must-ship,
-parked) and `requirements.md` (what the client asked for and how they judge it).
+Then fill in `sprint.md` (goal, must-ship, parked), which the brief quotes in every session. The
+client's requirements live where your team already keeps them, in the tickets and the
+repository's docs; an optional `requirements.md` in the agent-loop folder is quoted too, for
+projects that have no other home for them.
 
 ### Where things live
 
-| Layout | State (config, sprint, requirements, knowledge, decisions, plans, handoffs, runs) | Ticket worktrees |
+| Layout | State (config, sprint, knowledge, decisions, plans, handoffs, runs) | Ticket worktrees |
 |---|---|---|
 | Plain clone | `<clone>/.git/agent-loop/`: shared by every worktree, never committed, never in `git status` | `<clone>/../<repo>-worktrees/<id>` |
 | Bare repo with sibling worktrees | `<root>/.agent-loop/` | `<root>/<id>` |
@@ -97,7 +99,7 @@ Both are settings (`worktreePath`, `init --store root|git`).
 | `sprint [ids] [--plan]` | start the loop over ready tickets (or the ids given) in the background; `--plan` stops after planning |
 | `ticket <id> [--plan]` | the same loop on one ticket, even a blocked one |
 | `status [run]` | where a run is: ready to ship, needs you, deferred |
-| `ingest <path>` | add transcripts, documents or test files to the project knowledge, and distil them into the requirements |
+| `ingest <path>` | add transcripts, documents or test files to the project knowledge, and distil what they settle into the repo docs and tickets |
 | `ship [ids]` | commit, push, open PRs and move tickets, after one confirmation |
 
 In Claude Code they are `/agent-loop:<skill>`; Codex and Cursor pick them up by name or
@@ -120,11 +122,13 @@ decisions.md                       what shipped tickets decided, newest first
 
 The **ingest** skill adds a transcript, document or folder of test files: it copies them (skipping
 files already there), writes text versions, describes each item, and proposes the requirement
-changes the material settles, with sources, for you to approve into `requirements.md`. The CLI
+changes the material settles, with sources, for you to approve: edits to the repository's docs
+(committed like any change), new or changed tickets, or `requirements.md` where a project keeps
+one. The CLI
 behind it: `agentloop.py ingest <path>`, `knowledge`, `annotate <id> --summary … --use …`.
 
 How it reaches agents:
-- **Every session:** the brief quotes `sprint.md`, `requirements.md` and the decisions log, and lists
+- **Every session:** the brief quotes `sprint.md` (and `requirements.md` if used) and the decisions log, and lists
   the knowledge index (one line per item, not the content).
 - **Every ticket:** the planner reads the index and picks the items the ticket needs; implement,
   review and fix get those items' paths.

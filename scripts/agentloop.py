@@ -691,15 +691,16 @@ def section(body: str, title: str) -> str:
 
 # --- brief -------------------------------------------------------------------
 
-def read_capped(path: Path, cap: int) -> str:
-    """The file without HTML comments, capped; a pointer instead when it is still the template."""
+def read_capped(path: Path, cap: int, optional: bool = False) -> str:
+    """The file without HTML comments, capped; a pointer instead when it is still the template
+    (nothing at all for an optional file)."""
     if not path.is_file():
         return ""
     strip = lambda s: re.sub(r"<!--.*?-->", "", s, flags=re.S).strip()  # noqa: E731
     text = strip(path.read_text())
     template = PLUGIN_ROOT / "templates" / path.name
     if not text or (template.is_file() and text == strip(template.read_text())):
-        return f"(not filled in yet: edit `{path}`)"
+        return "" if optional else f"(not filled in yet: edit `{path}`)"
     return text if len(text) <= cap else text[:cap].rstrip() + f"\n\n… (truncated; read {path} for the rest)"
 
 
@@ -712,8 +713,9 @@ def brief(p: Project, s: Snapshot) -> str:
     for e in s.errors:
         out += [f"> {e}"]
 
-    for title, name, cap in (("Sprint goal", "sprint.md", 4000), ("Client requirements", "requirements.md", 6000)):
-        text = read_capped(p.dir / name, cap)
+    for title, name, cap, optional in (("Sprint goal", "sprint.md", 4000, False),
+                                       ("Client requirements", "requirements.md", 6000, True)):
+        text = read_capped(p.dir / name, cap, optional)
         if text:
             out += ["", f"## {title}", "", text]
 
@@ -880,7 +882,7 @@ def detect(start: Path, tracker_url: str | None) -> dict:
 def scaffold(d: Path) -> None:
     (d / "handoffs").mkdir(parents=True, exist_ok=True)
     (d / "plans").mkdir(exist_ok=True)
-    for name in ("sprint.md", "requirements.md"):
+    for name in ("sprint.md",):  # requirements.md is optional: most projects keep that in tickets and repo docs
         target = d / name
         if not target.exists():
             target.write_text((PLUGIN_ROOT / "templates" / name).read_text())

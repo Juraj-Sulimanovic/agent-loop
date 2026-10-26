@@ -1,6 +1,6 @@
 ---
 name: brief
-description: Refresh and read the project brief (tracker board state, sprint goal, client requirements, open and merged PRs, local worktrees, and what other agents did). Use when the user asks for the state of the project, the board or the sprint, or when the brief from session start is stale.
+description: Refresh and read the project brief (tracker board state, sprint goal, decisions, project knowledge, open and merged PRs, local worktrees, and what other agents did). Use when the user asks for the state of the project, the board or the sprint, or when the brief from session start is stale.
 ---
 
 # Project brief

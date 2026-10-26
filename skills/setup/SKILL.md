@@ -92,7 +92,7 @@ way; then match it (`{ref}`, `{id}`, `{url}` and `{name}` are filled in).
 ## 5. Write and prove
 
 ```bash
-$AL --config <scratch file> init          # installs it where facts.store says; keeps sprint.md and requirements.md
+$AL --config <scratch file> init          # installs it where facts.store says; keeps an existing sprint.md
 $AL doctor
 ```
 
@@ -100,8 +100,8 @@ Fix every FAIL line with the user (wrong column name, missing make target, missi
 rerun the doctor until it passes. Then run `$AL brief` and show its first lines.
 
 Finish by telling the user:
-- the two files to fill in now, `<dir>/sprint.md` and `<dir>/requirements.md` (offer to draft
-  `requirements.md` from the repository's docs if they want);
+- the file to fill in now, `<dir>/sprint.md` (goal, must-ship, parked); client material such as
+  meeting transcripts, specs and test files goes in through the ingest skill;
 - new sessions anywhere in this repository now start with the brief;
 - the ticket skill with `--plan` is the safe first run, then the sprint skill; a run goes on in the
   background and the status skill reports on it.

@@ -145,7 +145,12 @@ class KnowledgeInTheLoopTest(unittest.TestCase):
         text = self.cli("brief")
         self.assertIn("## Project knowledge", text)
         self.assertIn("`daily-sync` (transcript", text)
-        self.assertIn("[not yet distilled into requirements]", text)
+        self.assertIn("[not yet distilled]", text)
+        self.assertNotIn("Client requirements", text)       # optional, and this project has none
+        (self.state / "requirements.md").write_text((al.PLUGIN_ROOT / "templates" / "requirements.md").read_text())
+        self.assertNotIn("Client requirements", self.cli("brief"))  # the untouched template counts as none
+        (self.state / "requirements.md").write_text("## Outcomes\n\n- Deals stay in line with their sheets.\n")
+        self.assertIn("Deals stay in line with their sheets.", self.cli("brief"))
         self.assertIn("## Decisions log (newest first)", text)
         self.assertIn("### ", text.split("## Decisions log (newest first)")[1])
         self.assertIn("- Count weekends as hours only.", text)
