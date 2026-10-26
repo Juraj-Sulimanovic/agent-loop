@@ -202,6 +202,7 @@ class Loop:
         self.run.update(ticket=(t["id"], {"stage": label}))
         self.run.log(f"{t['ref']} {label} ({tool})")
         mode = MODES[stage]
+        (self.run.dir / f"{t['id']}.{label}.prompt.md").write_text(prompt)  # what the agent was asked, for anyone debugging a run
         before = fingerprint(t["worktree"]) if mode == "check" else None
         try:
             result = self.adapter(

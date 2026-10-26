@@ -202,7 +202,8 @@ PR when the template has those sections. Adding them to your PR template is wort
 
 `agentloop.py run [ids] [--plan] [--detach]` prepares the worktrees, refreshes the brief and runs
 the loop. Each run keeps its state in `<agent-loop folder>/runs/<run id>/`: `run.json` (where each
-ticket is, the summary when done), `log.txt`, and every agent call's result and output. A run that
+ticket is, the summary when done), `log.txt`, every agent call's prompt, result and output, and
+each review round's findings (`<id>.round<n>.json`). A run that
 stopped resumes with `run --resume <run id>`, reusing every finished call; a `--plan` run carries
 on into implementation with `run --resume <run id> --build`.
 

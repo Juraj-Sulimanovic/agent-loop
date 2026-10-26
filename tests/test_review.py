@@ -102,6 +102,7 @@ class ReviewTest(unittest.TestCase):
         self.assertIn("Report nothing else", prompt)
         self.assertIn("fix every instance of that class", agent.prompts["fix1"])
         self.assertNotIn("Scope: re-review", agent.prompts["review-correctness"])
+        self.assertEqual((run.dir / "1.review1-correctness.prompt.md").read_text(), prompt)   # saved for debugging
 
     def test_same_class_surviving_a_fix_stops_early(self):
         same = [finding("Blank name accepted", "missing ValueError")]

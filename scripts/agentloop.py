@@ -1206,7 +1206,8 @@ def cmd_status(a) -> None:
     import runner
     p = require_project(a.config)
     d = runs_dir(p)
-    runs = sorted(x.name for x in d.iterdir() if (x / "run.json").is_file()) if d.is_dir() else []
+    runs = [x.name for x in sorted((x for x in d.iterdir() if (x / "run.json").is_file()) if d.is_dir() else [],
+                                   key=lambda x: (x / "run.json").stat().st_mtime)]  # newest last, whatever the names
     if not runs:
         raise SystemExit("No runs yet.")
     run_id = a.run or runs[-1]
@@ -1259,7 +1260,7 @@ def cmd_findings(a) -> None:
     """What the reviewers keep finding across recent runs, so it can be fixed at the source."""
     p = require_project(a.config)
     d = runs_dir(p)
-    runs = sorted(x for x in d.iterdir() if x.is_dir()) if d.is_dir() else []
+    runs = sorted((x for x in d.iterdir() if x.is_dir()), key=lambda x: x.stat().st_mtime) if d.is_dir() else []
     groups: dict[str, dict] = {}
     for run in runs[-a.runs:]:
         for f in run.glob("*.round*.json"):
