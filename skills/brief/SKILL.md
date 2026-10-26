@@ -1,6 +1,6 @@
 ---
 name: brief
-description: Refresh and read the project brief (board state, sprint goal, client requirements, open and merged PRs, local worktrees, and what other agents did). Use when the user asks for the state of the project, the board or the sprint, or when the brief from session start is stale.
+description: Refresh and read the project brief (tracker board state, sprint goal, client requirements, open and merged PRs, local worktrees, and what other agents did). Use when the user asks for the state of the project, the board or the sprint, or when the brief from session start is stale.
 ---
 
 # Project brief
@@ -13,14 +13,14 @@ AL="python3 <this skill's base directory>/../../scripts/agentloop.py"
 $AL brief
 ```
 
-It prints the brief and saves it to `.agent-loop/brief.md` in the project root, where agents
-read it. Outside a project (no `.agent-loop/config.json` above the current directory) it
-says so; offer `$AL init --root <project root>`.
+It prints the brief and saves it as `brief.md` in the project's agent-loop folder, where
+agents read it.
+Outside a configured repository it says so; offer `/agent-loop:setup`.
 
-When the board is unavailable the brief says why. Usually `TRELLO_KEY` or `TRELLO_TOKEN` is
-not exported in the shell that started the session; the user exports both and restarts, or
-runs `! export TRELLO_TOKEN=...` (a token from
-`https://trello.com/1/authorize?expiration=30days&scope=read,write&response_type=token&name=agent-loop&key=<KEY>`).
-Never write a token into a file.
+When the board is unavailable the brief says why. Usually the tracker's credentials are not
+exported in the shell that started the session (`TRELLO_KEY` + `TRELLO_TOKEN`, or
+`JIRA_EMAIL` + `JIRA_API_TOKEN`), or `gh` lacks the `project` scope for a GitHub board
+(`gh auth refresh -s project`). The user can export them into this session with
+`! export NAME=...`. Never write a credential into a file.
 
 Answer the user's question from the brief; do not paste the brief back at them.

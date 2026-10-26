@@ -1,6 +1,8 @@
 {
   "name": "agent-loop",
-  "version": "0.1.0",
-  "description": "Start every session already knowing the board, sprint goal, client requirements, open PRs and what other agents did; then plan, implement, review and fix Trello tickets in parallel worktrees and ship them on one confirmation.",
-  "author": {"name": "Juraj Sulimanović"}
+  "version": "0.2.0",
+  "description": "Start every session already knowing the board, sprint goal, client requirements, open PRs and what other agents did; then plan, implement, review and fix tickets from Trello, GitHub Projects or Jira in parallel worktrees, and ship them on one confirmation.",
+  "author": {
+    "name": "Juraj Sulimanovi\u0107"
+  }
 }

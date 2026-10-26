@@ -1,8 +1,8 @@
 export const meta = {
   name: 'sprint',
-  description: 'Plan, implement, review and fix a batch of Trello tickets in parallel worktrees, ending with staged changes and a handoff note per ticket',
+  description: 'Plan, implement, review and fix a batch of tickets in parallel worktrees, ending with staged changes and a handoff note per ticket',
   whenToUse:
-    'Invoked by /agent-loop:sprint and /agent-loop:ticket after `agentloop.py prepare` has created the worktrees. Requires args {project: {root, briefPath, checks, exclusive, maxParallel, maxFixRounds}, tickets: [prepared ticket objects], stopAfter?: "plan"}. Never commits or pushes; /agent-loop:ship does that after the user confirms.',
+    'Invoked by /agent-loop:sprint and /agent-loop:ticket after `agentloop.py prepare` has created the worktrees. Requires the JSON `agentloop.py prepare` prints ({project, tickets}) plus stamp and optional stopAfter: "plan". Never commits or pushes; /agent-loop:ship does that after the user confirms.',
   phases: [
     { title: 'Plan', detail: 'one planner per ticket, in its worktree' },
     { title: 'Build', detail: 'implement, independent review, fix until clean or out of rounds' },
@@ -16,7 +16,7 @@ export const meta = {
 
 const ARGS = typeof args === 'string' ? JSON.parse(args) : args
 if (!ARGS || !ARGS.project || !Array.isArray(ARGS.tickets) || !ARGS.tickets.length) {
-  throw new Error('sprint workflow requires args {project: {root, briefPath, ...}, tickets: [...]}')
+  throw new Error('sprint workflow requires args {project: {root, dir, briefPath, ...}, tickets: [...]}')
 }
 const P = ARGS.project
 const CHECKS = P.checks || []
@@ -24,6 +24,8 @@ const EXCLUSIVE = P.exclusive || []
 const MAX_PARALLEL = Math.max(1, Math.min(P.maxParallel || 10, 16))
 const MAX_FIX = Math.max(0, Math.min(P.maxFixRounds == null ? 2 : P.maxFixRounds, 4))
 const tickets = ARGS.tickets.filter(t => t && !t.error)
+const DIR = P.dir || `${P.root}/.agent-loop`
+const ref = t => t.ref || '#' + t.id
 
 const checksLine = CHECKS.length
   ? `The checks are: ${CHECKS.map(c => '`' + c + '`').join(', ')}. Run them from the worktree.`
@@ -31,12 +33,12 @@ const checksLine = CHECKS.length
 
 function header(t) {
   return [
-    `You are working on Trello card #${t.id} "${t.name}" (${t.url}).`,
+    `You are working on ticket ${ref(t)} "${t.name}" (${t.url}).`,
     `Your worktree is \`${t.worktree}\` on branch \`${t.branch}\`, cut from \`${t.base}\`. Work only inside it: \`cd\` there first and use absolute paths under it.`,
     `Read \`${t.worktree}/AGENTS.md\` (or CLAUDE.md) before anything else and follow it; it overrides general habits. Read the project brief at \`${P.briefPath}\` for the sprint goal, client requirements, the rest of the board and what other agents did.`,
     'Never run `git commit`, `git push`, `gh pr create` or anything that changes a remote, a branch or history. Staging with `git add` is allowed and expected.',
     '',
-    '## The card',
+    '## The ticket',
     '',
     t.desc || '(no description)',
   ].join('\n')
@@ -109,11 +111,11 @@ const plans = await parallel(tickets.map(t => () =>
       '',
       '## Your job: plan, do not implement',
       '',
-      `Read the code the card touches and write a plan to \`${P.root}/.agent-loop/plans/${t.id}.md\`: the approach, the files that change, the steps, and the risks. Reuse what exists; name only code that exists on the branch.`,
+      `Read the code the card touches and write a plan to \`${DIR}/plans/${t.id}.md\`: the approach, the files that change, the steps, and the risks. Reuse what exists; name only code that exists on the branch.`,
       'List every repo-relative file you expect to change or create in `files`; another planner works beside you and two tickets touching the same file are not run together, so be complete rather than minimal.',
       'Set feasible=false only when the card cannot be done without a decision a human must make (contradicting requirements, missing access, an unanswerable ambiguity), and put that one question in `question`. Ordinary uncertainty is a risk, not a blocker.',
     ].join('\n'),
-    { label: `plan:#${t.id}`, phase: 'Plan', schema: PLAN },
+    { label: `plan:${ref(t)}`, phase: 'Plan', schema: PLAN },
   )))
 
 // ---- Batch: no two tickets touching the same file or exclusive area --------
@@ -131,18 +133,18 @@ const batch = [], deferred = [], needsHuman = []
 const taken = new Map()
 tickets.forEach((t, i) => {
   const plan = plans[i]
-  if (!plan) return deferred.push({ id: t.id, reason: 'planner failed; run it again' })
-  if (!plan.feasible) return needsHuman.push({ id: t.id, name: t.name, question: plan.question || plan.summary })
-  if (batch.length >= MAX_PARALLEL) return deferred.push({ id: t.id, reason: `over maxParallel (${MAX_PARALLEL})` })
+  if (!plan) return deferred.push({ id: t.id, ref: ref(t), reason: 'planner failed; run it again' })
+  if (!plan.feasible) return needsHuman.push({ id: t.id, ref: ref(t), name: t.name, question: plan.question || plan.summary })
+  if (batch.length >= MAX_PARALLEL) return deferred.push({ id: t.id, ref: ref(t), reason: `over maxParallel (${MAX_PARALLEL})` })
   const mine = claims(plan)
   const clash = [...mine].find(c => taken.has(c))
-  if (clash) return deferred.push({ id: t.id, reason: `overlaps #${taken.get(clash)} on ${clash.replace(/^\w+:/, '')}` })
-  mine.forEach(c => taken.set(c, t.id))
+  if (clash) return deferred.push({ id: t.id, ref: ref(t), reason: `overlaps ${taken.get(clash)} on ${clash.replace(/^\w+:/, '')}` })
+  mine.forEach(c => taken.set(c, ref(t)))
   batch.push({ t, plan })
 })
-log(`Batch: ${batch.map(b => '#' + b.t.id).join(', ') || 'none'}`)
-if (deferred.length) log(`Deferred: ${deferred.map(d => `#${d.id} (${d.reason})`).join('; ')}`)
-if (needsHuman.length) log(`Needs a human: ${needsHuman.map(n => '#' + n.id).join(', ')}`)
+log(`Batch: ${batch.map(b => ref(b.t)).join(', ') || 'none'}`)
+if (deferred.length) log(`Deferred: ${deferred.map(d => `${d.ref} (${d.reason})`).join('; ')}`)
+if (needsHuman.length) log(`Needs a human: ${needsHuman.map(n => n.ref).join(', ')}`)
 
 if (ARGS.stopAfter === 'plan') {
   return { stoppedAfter: 'plan', plans: batch.map(b => ({ id: b.t.id, ...b.plan })), deferred, needsHuman }
@@ -157,10 +159,10 @@ function blocking(review) {
 
 function reviewPrompt(t, round) {
   return [
-    `You are reviewing card #${t.id} "${t.name}" (${t.url}). The change is uncommitted in \`${t.worktree}\` on \`${t.branch}\`, cut from \`${t.base}\`; read it with \`git -C ${t.worktree} diff ${t.base}\` plus \`git -C ${t.worktree} status\` for new files. Do not edit any file.`,
+    `You are reviewing ticket ${ref(t)} "${t.name}" (${t.url}). The change is uncommitted in \`${t.worktree}\` on \`${t.branch}\`, cut from \`${t.base}\`; read it with \`git -C ${t.worktree} diff ${t.base}\` plus \`git -C ${t.worktree} status\` for new files. Do not edit any file.`,
     `Read \`${t.worktree}/AGENTS.md\` (or CLAUDE.md): its conventions are the review standard. Read the project brief at \`${P.briefPath}\` for the requirements the card serves.`,
     '',
-    '## The card',
+    '## The ticket',
     '',
     t.desc || '(no description)',
     '',
@@ -183,16 +185,16 @@ const built = await pipeline(
       '',
       '## Your job: implement',
       '',
-      `The plan is in \`${P.root}/.agent-loop/plans/${t.id}.md\`; follow it unless the code proves it wrong, and say so if it does.`,
+      `The plan is in \`${DIR}/plans/${t.id}.md\`; follow it unless the code proves it wrong, and say so if it does.`,
       `Implement the card in full, with the tests the repository instructions ask for. ${checksLine} Leave every check passing.`,
       'Finish with all your changes staged (`git add -A` in the worktree) and nothing else changed. If you cannot finish, stage what is sound and say what blocks you in `stuck`.',
     ].join('\n'),
-    { label: `build:#${t.id}`, phase: 'Build', schema: BUILD },
+    { label: `build:${ref(t)}`, phase: 'Build', schema: BUILD },
   ).then(build => ({ build })),
   async (prev, { t }) => {
     if (!prev || !prev.build) return { t, status: 'needs-human', why: 'implementer failed' }
     if (prev.build.stuck) return { t, status: 'needs-human', why: prev.build.stuck, build: prev.build }
-    let review = await agent(reviewPrompt(t, 0), { label: `review:#${t.id}`, phase: 'Build', schema: REVIEW })
+    let review = await agent(reviewPrompt(t, 0), { label: `review:${ref(t)}`, phase: 'Build', schema: REVIEW })
     let round = 0
     while (review && blocking(review) && round < MAX_FIX) {
       round++
@@ -211,9 +213,9 @@ const built = await pipeline(
           '',
           `${checksLine} Finish with everything staged.`,
         ].join('\n'),
-        { label: `fix${round}:#${t.id}`, phase: 'Build', schema: BUILD },
+        { label: `fix${round}:${ref(t)}`, phase: 'Build', schema: BUILD },
       )
-      review = await agent(reviewPrompt(t, round), { label: `review${round}:#${t.id}`, phase: 'Build', schema: REVIEW })
+      review = await agent(reviewPrompt(t, round), { label: `review${round}:${ref(t)}`, phase: 'Build', schema: REVIEW })
     }
     if (!review) return { t, status: 'needs-human', why: 'reviewer failed', build: prev.build }
     const clean = !blocking(review)
@@ -227,10 +229,10 @@ const built = await pipeline(
     if (!res) return { t, status: 'needs-human', why: 'build stage crashed' }
     return agent(
       [
-        `Card #${t.id} "${t.name}" (${t.url}) has been implemented in \`${t.worktree}\` (branch \`${t.branch}\`, base \`${t.base}\`). Status: ${res.status}${res.why ? ' (' + res.why + ')' : ''}. Do not edit code.`,
-        `Read the staged diff (\`git -C ${t.worktree} diff --cached ${t.base}\`), the plan at \`${P.root}/.agent-loop/plans/${t.id}.md\`, and \`${t.worktree}/AGENTS.md\` for the commit message and pull request conventions.`,
+        `Ticket ${ref(t)} "${t.name}" (${t.url}) has been implemented in \`${t.worktree}\` (branch \`${t.branch}\`, base \`${t.base}\`). Status: ${res.status}${res.why ? ' (' + res.why + ')' : ''}. Do not edit code.`,
+        `Read the staged diff (\`git -C ${t.worktree} diff --cached ${t.base}\`), the plan at \`${DIR}/plans/${t.id}.md\`, and \`${t.worktree}/AGENTS.md\` for the commit message and pull request conventions.`,
         '',
-        `Write \`${P.root}/.agent-loop/handoffs/${t.id}.md\` exactly in this shape; the next agents on this project read it to learn what happened here:`,
+        `Write \`${DIR}/handoffs/${t.id}.md\` exactly in this shape; the next agents on this project read it to learn what happened here:`,
         '',
         '```',
         '---',
@@ -273,17 +275,17 @@ const built = await pipeline(
         '',
         'Return the commit message, PR title and PR change bullets you wrote.',
       ].join('\n'),
-      { label: `handoff:#${t.id}`, phase: 'Handoff', schema: HANDOFF, effort: 'low' },
+      { label: `handoff:${ref(t)}`, phase: 'Handoff', schema: HANDOFF, effort: 'low' },
     ).then(h => ({ ...res, handoff: h }))
   },
 )
 
 const done = built.filter(Boolean)
 return {
-  ready: done.filter(r => r.status === 'ready').map(r => ({ id: r.t.id, name: r.t.name, branch: r.t.branch, rounds: r.rounds, ...(r.handoff || {}) })),
+  ready: done.filter(r => r.status === 'ready').map(r => ({ id: r.t.id, ref: ref(r.t), name: r.t.name, branch: r.t.branch, rounds: r.rounds, ...(r.handoff || {}) })),
   needsHuman: [
     ...needsHuman,
-    ...done.filter(r => r.status !== 'ready').map(r => ({ id: r.t.id, name: r.t.name, question: r.why })),
+    ...done.filter(r => r.status !== 'ready').map(r => ({ id: r.t.id, ref: ref(r.t), name: r.t.name, question: r.why })),
   ],
   deferred,
 }

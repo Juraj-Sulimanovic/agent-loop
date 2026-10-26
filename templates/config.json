@@ -1,22 +1,41 @@
 {
   "name": "",
-  "repo": "owner/name",
+  "repo": "",
   "base": "origin/main",
-  "mainWorktree": "main",
+  "mainWorktree": ".",
+  "worktreePath": "{root}/../{repo}-worktrees/{id}",
   "branch": "{type}/{slug}",
-  "typeByLabel": {"Bug": "fix", "Chore": "chore"},
+  "typeByLabel": {
+    "bug": "fix",
+    "chore": "chore"
+  },
   "defaultType": "feat",
   "setup": [],
   "checks": [],
   "exclusive": [],
-  "contextFiles": ["AGENTS.md"],
+  "contextFiles": [],
   "maxParallel": 10,
   "maxFixRounds": 2,
-  "prDraft": false,
-  "trello": {
-    "board": "",
-    "lists": {"ready": "Sprint Backlog", "doing": "In Progress", "review": "Code Review"},
-    "show": ["Sprint Backlog", "In Progress", "Code Review"],
-    "done": ["Done"]
+  "tracker": {
+    "type": "trello",
+    "columns": {
+      "ready": "Sprint Backlog",
+      "doing": "In Progress",
+      "review": "Code Review"
+    },
+    "show": [
+      "Sprint Backlog",
+      "In Progress",
+      "Code Review"
+    ],
+    "done": [
+      "Done"
+    ],
+    "blockerSection": "Blockers"
+  },
+  "pr": {
+    "template": ".github/PULL_REQUEST_TEMPLATE.md",
+    "ticketLine": "#### Ticket [{ref}]({url})",
+    "draft": false
   }
 }

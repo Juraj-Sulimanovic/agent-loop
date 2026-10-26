@@ -1,15 +1,15 @@
 ---
 name: ship
-description: Commit, push and open the pull request for tickets the sprint loop left ready, after the user confirms the exact commands once, then move their cards to Code Review.
-argument-hint: "[card ids...]"
+description: Commit, push and open the pull request for tickets the sprint loop left ready, after the user confirms the exact commands once, then move the tickets to the review column.
+argument-hint: "[ticket ids...]"
 disable-model-invocation: true
 ---
 
 # Ship the ready tickets
 
-The repository rule is that agents stage and propose, and `git commit`, `git push` and
-`gh pr create` run only after the user confirmed the exact command. This skill gathers those
-commands for every ready ticket and asks once.
+The loop leaves changes staged, never committed: many repositories let agents only stage and
+propose, with `git commit`, `git push` and `gh pr create` run after the user confirmed the exact
+command. This skill gathers those commands for every ready ticket and asks once.
 
 The CLI is `scripts/agentloop.py` in this plugin, two directories above this skill's base
 directory: `AL="python3 <base>/../../scripts/agentloop.py"`.
@@ -17,6 +17,7 @@ directory: `AL="python3 <base>/../../scripts/agentloop.py"`.
 ## 1. Gather
 
 ```bash
+$AL show-config                # repo, pr.template, pr.ticketLine, pr.draft, dir
 $AL handoffs --status ready
 ```
 
@@ -32,10 +33,12 @@ ticket out until the user says how to handle it.
 
 ## 2. Propose
 
-The PR body is `.github/PULL_REQUEST_TEMPLATE.md` from the worktree, filled per the
-repository's own `/pr` conventions: the ticket line `#### Ticket [<id>](<card url>)`, then
-`## Changes` with the handoff's **PR changes** bullets. Write each body to
-`<root>/.agent-loop/plans/<id>.pr.md`.
+Build each PR body from the worktree's copy of `pr.template` when the config names one: its
+first line becomes `pr.ticketLine` with `{ref}`, `{id}`, `{url}` and `{name}` filled from the
+handoff (`card` is the URL), and its changes section takes the handoff's **PR changes**
+bullets. Follow the repository's own PR conventions where it has them (a `/pr` skill, the
+AGENTS.md git section). Without a template the body is the ticket line plus the bullets.
+Write each body to `<dir>/plans/<id>.pr.md`.
 
 For each ticket show the diff stat, the handoff's **Open review findings**, and the exact
 commands:
@@ -43,7 +46,7 @@ commands:
 ```bash
 git -C <worktree> commit -m "<handoff commit message>"
 git -C <worktree> push -u origin <branch>
-gh pr create -R <repo> --head <branch> --base <base> --title "<PR title>" --body-file <body file>   # add --draft when config prDraft is true
+gh pr create -R <repo> --head <branch> --base <base> --title "<PR title>" --body-file <body file>   # add --draft when pr.draft is true
 ```
 
 Ask with one multi-select question which tickets to ship (all ready ones listed, recommended

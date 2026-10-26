@@ -1,7 +1,7 @@
 ---
 name: sprint
-description: Plan, implement, review and fix every ready Sprint Backlog ticket in parallel, one agent chain per ticket in its own worktree, ending with staged changes and a handoff note per ticket.
-argument-hint: "[card ids...] [--plan]"
+description: Plan, implement, review and fix every ready ticket on the board in parallel, one agent chain per ticket in its own worktree, ending with staged changes and a handoff note per ticket.
+argument-hint: "[ticket ids...] [--plan]"
 disable-model-invocation: true
 ---
 
@@ -18,10 +18,10 @@ directory: `AL="python3 <base>/../../scripts/agentloop.py"`.
 
 ```bash
 $AL brief --json          # refreshes .agent-loop/brief.md; note its path
-$AL tickets $IDS          # the ids given, else every ready Sprint Backlog card
+$AL tickets $IDS          # the ids given, else every ready ticket in the Ready column
 ```
 
-`$IDS` are the card ids in `$ARGUMENTS`, if any. Without ids you get the cards whose
+`$IDS` are the ticket ids in `$ARGUMENTS` (`812`, `#812` or `ABC-12`), if any. Without ids you get the tickets whose
 blockers are resolved and which have no worktree or open PR yet. A ticket stacked on an open
 blocker PR is ready, with that PR's branch as its base. Say in one line which tickets will
 run and which were skipped and why (`$AL tickets --all` shows the skipped ones), then go on
@@ -30,23 +30,21 @@ without waiting. Zero tickets: say so and stop.
 ## 2. Prepare the worktrees
 
 ```bash
-$AL prepare <id> <id> ...
+$AL prepare <id> <id> ... > <scratch>/sprint-args.json
 ```
 
-It creates each worktree at `<root>/<id>` on `type/<id>-slug` from the ticket's base, or reuses
-the existing one, then runs the config's `setup` commands. Drop any ticket that comes back with
-`error` or a failed setup step and say why.
+It creates each worktree on `type/<id>-slug` from the ticket's base (or reuses the existing
+one), runs the config's `setup` commands, and prints the workflow's arguments:
+`{project, tickets, skipped}`. Say in one line which tickets were skipped and why.
 
 ## 3. Run the workflow
-
-Read the project config at `<root>/.agent-loop/config.json` and call:
 
 ```
 Workflow({
   name: "agent-loop:sprint",
   args: {
-    project: {root, briefPath, checks, exclusive, maxParallel, maxFixRounds},   // from the config and step 1
-    tickets: <the prepared ticket objects from step 2>,
+    project: <project from step 2>,
+    tickets: <tickets from step 2>,
     stamp: "<current ISO date-time>",
     stopAfter: "plan"            // only with --plan
   }
@@ -59,9 +57,9 @@ offer to run again without `--plan` using `resumeFromRunId` so the plans are reu
 ## 4. Report
 
 When it returns, report three short lists:
-- **Ready to ship:** id, name, commit message, fix rounds used.
-- **Needs you:** id and the exact question or blocker.
-- **Deferred:** id and the reason (overlaps, maxParallel). The user reruns `/agent-loop:sprint`
+- **Ready to ship:** ref, name, commit message, fix rounds used.
+- **Needs you:** ref and the exact question or blocker.
+- **Deferred:** ref and the reason (overlaps, maxParallel). The user reruns `/agent-loop:sprint`
   for these after the overlapping tickets merge.
 
-Then point at `/agent-loop:ship` for the ready ones. Handoffs are in `<root>/.agent-loop/handoffs/`.
+Then point at `/agent-loop:ship` for the ready ones. Handoffs are in `<project dir>/handoffs/`.

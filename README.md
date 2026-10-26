@@ -3,72 +3,91 @@
 A Claude Code plugin that removes the two chores of working with agents: re-explaining the
 project to every new session, and carrying one agent's work over to the next.
 
-- **Every session starts briefed.** A SessionStart hook injects the board (Sprint Backlog
-  with each card's readiness, In Progress, Code Review…), the sprint goal, the client
+- **Every session starts briefed.** A SessionStart hook injects the board (the Ready column
+  with each ticket's readiness, In Progress, Review…), the sprint goal, the client
   requirements, open and recently merged PRs, local worktrees, and the handoff notes earlier
   agents left behind.
 - **One command runs the loop.** `/agent-loop:sprint` takes every ready ticket, plans each in
   its own worktree, keeps tickets that touch the same files apart, then runs implement →
   independent review → fix (up to N rounds) per ticket in parallel, and writes a handoff note.
 - **One confirmation ships it.** `/agent-loop:ship` shows the exact commit, push and
-  `gh pr create` commands for every ready ticket, asks once, runs them, and moves the cards to
-  Code Review. Merging stays with you.
+  `gh pr create` commands for every ready ticket, asks once, runs them, and moves the tickets
+  to the review column. Merging stays with you.
 
 The handoff notes are the shared memory: each agent writes what it did, the decisions others
-should follow and the follow-ups it found to `.agent-loop/handoffs/<card>.md`, and the next
-brief carries them.
+should follow and the follow-ups it found, and the next brief carries them.
+
+Works with **Trello**, **GitHub Projects** and **Jira** boards, GitHub repositories, and both a
+plain clone and a bare repository with sibling worktrees.
 
 ## Install
 
 ```
-/plugin marketplace add ~/repos/agent-loop
+/plugin marketplace add Juraj-Sulimanovic/agent-loop
 /plugin install agent-loop@agent-loop
 ```
 
-## Set up a project
+## Set up a repository
 
-```bash
-python3 ~/repos/agent-loop/scripts/agentloop.py init --root <project root>
+Start Claude Code inside the repository and run:
+
+```
+/agent-loop:setup [board URL]
 ```
 
-Then edit `<root>/.agent-loop/`:
+The wizard detects the layout, default branch, lint/test commands, per-worktree setup (`.env`,
+dependency install), lockfiles and migration folders, PR template and docs; asks for the
+tracker, its columns, which checks to run and how many tickets to run at once; writes the
+config; and runs `doctor` until everything passes.
 
-| File | What it holds |
+Credentials stay in the environment, never in a file:
+
+| Tracker | Needs |
 |---|---|
-| `config.json` | repo, Trello board and list names, worktree setup commands, checks, exclusive areas |
-| `sprint.md` | the sprint goal, must-ship cards, what is parked |
-| `requirements.md` | what the client asked for and how they judge it |
+| Trello | `TRELLO_KEY`, `TRELLO_TOKEN` |
+| GitHub Projects | `gh auth refresh -s project` |
+| Jira | `JIRA_EMAIL`, `JIRA_API_TOKEN` (an Atlassian API token) |
 
-`.agent-loop/` lives in the project root, outside any worktree, so it is never committed and
-every worktree under the root shares it. Worktrees are created at `<root>/<card id>`.
+Then fill in the two files the brief quotes in every session: `sprint.md` (goal, must-ship,
+parked) and `requirements.md` (what the client asked for and how they judge it).
 
-Export Trello credentials in the shell you start `claude` from (never in a file):
+### Where things live
 
-```bash
-export TRELLO_KEY=...  TRELLO_TOKEN=...
-```
+| Layout | State (config, sprint, requirements, plans, handoffs) | Ticket worktrees |
+|---|---|---|
+| Plain clone | `<clone>/.git/agent-loop/`: shared by every worktree, never committed, never in `git status` | `<clone>/../<repo>-worktrees/<id>` |
+| Bare repo with sibling worktrees | `<root>/.agent-loop/` | `<root>/<id>` |
 
-Without them the brief still carries PRs, worktrees, handoffs and the sprint files, and says
-the board is unavailable.
+Both are settings (`worktreePath`, `init --store root|git`).
 
 ## Commands
 
 | Command | Does |
 |---|---|
+| `/agent-loop:setup [url]` | configure or reconfigure the repository |
 | `/agent-loop:brief` | refresh the brief mid-session |
 | `/agent-loop:sprint [ids] [--plan]` | the parallel loop over ready tickets (or the ids given); `--plan` stops after planning |
-| `/agent-loop:ticket <id> [--plan]` | the same loop on one card, even a blocked one |
-| `/agent-loop:ship [ids]` | commit, push, open PRs and move cards, after one confirmation |
+| `/agent-loop:ticket <id> [--plan]` | the same loop on one ticket, even a blocked one |
+| `/agent-loop:ship [ids]` | commit, push, open PRs and move tickets, after one confirmation |
+
+The skills drive `scripts/agentloop.py`, which also works on its own: `detect`, `init`,
+`doctor`, `statuses`, `brief`, `tickets`, `prepare`, `handoffs`, `mark`, `move`
+(`python3 scripts/agentloop.py --help`).
 
 ## How tickets are chosen
 
-A Sprint Backlog card is **ready** when it has no worktree or open PR yet and every `#id` in
-its `### Blockers` section is resolved (card in a `done` list, archived, or its branch merged).
-A card whose single open blocker already has a PR is ready too, **stacked** on that PR's branch.
-Branches are `{type}/{card url slug}`, the type coming from `typeByLabel` or `defaultType`.
+A ticket in the Ready column is **ready** when it has no worktree or open PR yet and its
+blockers are resolved (in a done column, closed or archived, or with their branch merged). A
+ticket whose single open blocker already has a PR is ready too, **stacked** on that PR's branch.
 
-Within a run, tickets whose plans touch the same file, or the same `exclusive` prefix (for
-example `alembic/versions/`), are not built together: the later one is deferred and reported.
+Blockers come from the tracker where it has them (Jira "is blocked by" links, GitHub issue
+dependencies) and otherwise from the description: `#123` refs under a `Blockers` heading
+(`tracker.blockerSection`) or after "Blocked by" / "Depends on".
+
+Branches are `{type}/{id}-{title words}`, the type from `typeByLabel` (`bug` → `fix`) or
+`defaultType`. Within a run, tickets whose plans touch the same file, or the same `exclusive`
+path (lockfiles, manifests, migration folders), are not built together: the later one is
+deferred and reported.
 
 ## Tests
 
