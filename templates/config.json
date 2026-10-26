@@ -27,6 +27,14 @@
   "agentModels": {},
   "agentArgs": {},
   "agentTimeoutMinutes": 30,
+  "review": {
+    "lenses": [
+      "spec",
+      "correctness",
+      "standards"
+    ],
+    "verify": true
+  },
   "tracker": {
     "type": "trello",
     "columns": {

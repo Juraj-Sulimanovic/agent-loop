@@ -12,6 +12,9 @@ the next.
   worktree, keeps tickets that touch the same files apart, then runs implement → independent
   review → fix (up to N rounds) per ticket in parallel, and writes a handoff note. It runs in the
   background; the status skill reports on it.
+- **A review that holds up.** Parallel spec, correctness and standards reviewers, the checks run
+  by the runner itself, and a skeptic that tries to refute every blocking finding before a fix
+  round is spent on it.
 - **Any tool, per stage.** Each stage runs headless in Claude Code, Codex or Cursor, as the config
   says: for example Codex implements and Claude reviews, so the review is independent.
 - **One confirmation ships it.** The ship skill shows the exact commit, push and `gh pr create`
@@ -148,6 +151,29 @@ A stage without its own entry (`plan`, `implement`, `review`, `fix`, `handoff`) 
 Planning and the handoff run read-only; review may run the checks but not edit (the runner
 flags a reviewer that changed the worktree); implement and fix edit. Agents never write outside
 their worktree: the runner writes the plans and handoff notes from what they return.
+
+## Review
+
+Each review round, modelled on multi-agent code review (Anthropic's Code Review for Claude Code)
+and on Matt Pocock's two-axis code-review skill:
+
+1. **Checks:** the runner itself runs the configured checks in the worktree; a failing one is a
+   blocker, and its output goes to the fixer.
+2. **Independent reviewers in parallel**, one per angle: **spec** (every acceptance criterion
+   met, nothing unasked-for, tests that would catch a regression), **correctness** (edge cases,
+   error handling, security and data handling, tests that test the behaviour) and **standards**
+   (the repository's documented rules, plus the Fowler smell baseline as non-blocking notes).
+3. **A skeptic per blocking finding** tries to refute it, reading the code and running what it
+   cheaply can. Refuted findings are dropped; confirmed ones may be re-graded.
+4. Findings at the same place are merged, keeping the worst. Only confirmed blockers and majors,
+   unmet criteria and failing checks send the ticket back to the fixer.
+
+```json
+"review": {"lenses": ["spec", "correctness", "standards"], "verify": true}
+```
+
+Fewer lenses or `"verify": false` make a round cheaper. Reviewers and skeptics use the `review`
+stage's tool, so a different tool from the implementer's gives a truly independent review.
 
 ## Runs
 

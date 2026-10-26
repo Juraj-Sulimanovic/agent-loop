@@ -52,6 +52,39 @@ def claims(plan: dict, exclusive: list[str]) -> set[str]:
     return out
 
 
+LENSES = ("spec", "correctness", "standards")
+SEVERITY = {"blocker": 0, "major": 1, "minor": 2}
+
+
+def run_checks(worktree: str, checks: list[str], timeout: int = 900) -> list[dict]:
+    """Run the configured checks in the worktree: objective, so the runner runs them, not an agent."""
+    results = []
+    for cmd in checks:
+        try:
+            r = subprocess.run(cmd, shell=True, cwd=worktree, capture_output=True, text=True, timeout=timeout)
+            results.append({"cmd": cmd, "ok": r.returncode == 0, "tail": (r.stdout + r.stderr).strip()[-1500:]})
+        except subprocess.TimeoutExpired:
+            results.append({"cmd": cmd, "ok": False, "tail": f"timed out after {timeout // 60} min"})
+    return results
+
+
+def dedupe(findings: list[dict]) -> list[dict]:
+    """One finding per place: the same file and line from two reviewers keeps the more severe one."""
+    out: dict = {}
+    for f in sorted(findings, key=lambda f: SEVERITY.get(f["severity"], 3)):
+        key = (f.get("file"), f.get("line")) if f.get("file") and f.get("line") else ("text", f["issue"].strip().lower())
+        if key in out:
+            out[key]["lens"] = ", ".join(dict.fromkeys(out[key]["lens"].split(", ") + [f["lens"]]))
+        else:
+            out[key] = dict(f)
+    return list(out.values())
+
+
+def finding_text(f: dict) -> str:
+    where = f"{f['file']}{':' + str(f['line']) if f.get('line') else ''}: " if f.get("file") else ""
+    return f"{where}{f['issue']}" + (f"\nEvidence: {f['evidence']}" if f.get("evidence") else "") + (f"\nSuggested fix: {f['fix']}" if f.get("fix") else "")
+
+
 def blocking(review: dict) -> bool:
     return (any(f["severity"] != "minor" for f in review["findings"])
             or bool(review["unmetCriteria"]) or any(not c["ok"] for c in review["checks"]))
@@ -127,9 +160,12 @@ class Run:
 
 
 class Loop:
-    def __init__(self, run: Run, adapter: Adapter):
-        self.run, self.adapter = run, adapter
+    def __init__(self, run: Run, adapter: Adapter, checker: Callable[[str, list[str]], list[dict]] = run_checks):
+        self.run, self.adapter, self.checker = run, adapter, checker
         self.p = run.project
+        review = self.p.get("review") or {}
+        self.lenses = [x for x in review.get("lenses", LENSES) if x in LENSES] or list(LENSES)
+        self.verify = review.get("verify", True)
         self.checks = checks_line(self.p.get("checks") or [])
         self.parallel = max(1, min(int(self.p.get("maxParallel") or 10), 16))
         self.max_fix = max(0, min(int(self.p.get("maxFixRounds", 2)), 4))
@@ -187,10 +223,55 @@ class Loop:
             (plans / f"{t['id']}.md").write_text(plan["planMarkdown"].strip() + "\n")
         return plan
 
+    def check_results(self, t: dict, round_: int) -> list[dict]:
+        cached = self.run.dir / f"{t['id']}.checks{round_ or ''}.json"
+        if cached.is_file():
+            return json.loads(cached.read_text())
+        results = self.checker(t["worktree"], self.p.get("checks") or [])
+        cached.write_text(json.dumps(results, indent=2))
+        failed = [c["cmd"] for c in results if not c["ok"]]
+        self.run.log(f"{t['ref']} checks: " + (f"failing {', '.join(failed)}" if failed else f"{len(results)} passing"))
+        return results
+
     def review(self, t: dict, plan: dict, round_: int) -> dict | None:
+        """Independent reviewers, one per angle, in parallel; then a skeptic per blocking finding."""
+        suffix = str(round_) if round_ else ""
+        checks = self.check_results(t, round_)
         note = f"This is re-review round {round_}: judge the current state, not the history." if round_ else ""
-        label = f"review{round_}" if round_ else "review"
-        return self.call(t, label, "review", render("review", **self.values(t, plan, roundNote=note)), "review")
+        checks_note = ("" if self.p.get("checks") else
+                       "\nNo checks are configured: run the ones the repository instructions name, and report a failing one as a blocker.")
+
+        def lens_call(lens: str):
+            brief = render(f"lenses/{lens}", checksNote=checks_note)
+            prompt = render("review", **self.values(t, plan, lens=lens, lensBrief=brief, roundNote=note))
+            return self.call(t, f"review{suffix}-{lens}", "review", prompt, "findings")
+
+        with ThreadPoolExecutor(len(self.lenses)) as pool:
+            results = list(pool.map(lens_call, self.lenses))
+        if all(r is None for r in results):
+            return None
+        found = dedupe([dict(f, lens=lens) for lens, r in zip(self.lenses, results) if r for f in r["findings"]])
+        to_check = [f for f in found if f["severity"] != "minor"]
+        refuted = []
+        if self.verify and to_check:
+            def verify_call(i_f):
+                i, f = i_f
+                prompt = render("verify", **self.values(t, plan, lens=f["lens"], severity=f["severity"], finding=finding_text(f)))
+                return self.call(t, f"verify{suffix}-{i + 1}", "review", prompt, "verify")
+            with ThreadPoolExecutor(min(len(to_check), 8)) as pool:
+                verdicts = list(pool.map(verify_call, enumerate(to_check)))
+            for f, v in zip(to_check, verdicts):
+                if v is None:
+                    f["verified"] = False  # the skeptic failed: keep the finding, unconfirmed
+                elif v["verdict"] == "refuted":
+                    f["refuted"] = v["reason"]
+                    refuted.append(f)
+                else:
+                    f.update(severity=v["severity"], verified=True, reason=v["reason"])
+            found = [f for f in found if "refuted" not in f]
+            if refuted:
+                self.run.log(f"{t['ref']} review{suffix}: {len(refuted)} finding(s) refuted by the skeptic")
+        return {"findings": found, "unmetCriteria": [], "checks": checks, "refuted": refuted}
 
     def build(self, t: dict, plan: dict) -> dict:
         plan_md = plan.get("planMarkdown") or plan.get("summary", "")
@@ -204,10 +285,10 @@ class Loop:
         while review and blocking(review) and rounds < self.max_fix:
             rounds += 1
             todo = [f for f in review["findings"] if f["severity"] != "minor"]
-            lines = [f"- [{f['severity']}] " + (f"{f['file']}{':' + str(f['line']) if f.get('line') else ''}: " if f.get("file") else "")
-                     + f["issue"] + (f" (suggested: {f['fix']})" if f.get("fix") else "") for f in todo]
+            lines = [f"- [{f['severity']}, {f['lens']} review] " + finding_text(f).replace("\n", "\n  ") for f in todo]
             lines += [f"- [unmet criterion] {c}" for c in review["unmetCriteria"]]
-            lines += [f"- [failing check] `{c['cmd']}`" for c in review["checks"] if not c["ok"]]
+            lines += [f"- [failing check] `{c['cmd']}`" + (f"\n  Output (tail):\n  " + c.get("tail", "").replace("\n", "\n  ") if c.get("tail") else "")
+                      for c in review["checks"] if not c["ok"]]
             self.call(t, f"fix{rounds}", "fix", render("fix", **self.values(t, plan, round=rounds, findings="\n".join(lines))), "build")
             review = self.review(t, plan, rounds)
         self.run.update(ticket=(t["id"], {"rounds": rounds}))

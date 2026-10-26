@@ -25,10 +25,13 @@ FILES = {"1": ["a.py"], "2": ["a.py", "b.py"], "3": ["alembic/versions/x.py"], "
 
 
 class FakeAdapter:
-    """Ticket 6 is infeasible, #1 passes after one fix, #5 never passes; everything else passes first time."""
+    """Ticket 6 is infeasible, #1 passes after one fix, #5 never passes; everything else passes first time.
 
-    def __init__(self, fail=False):
-        self.calls, self.fail, self.reviews = [], fail, {}
+    The correctness reviewer raises the blocking findings; the skeptic confirms them unless `refute` is set.
+    """
+
+    def __init__(self, fail=False, refute=False):
+        self.calls, self.fail, self.refute = [], fail, refute
 
     def __call__(self, *, tool, prompt, schema, cwd, mode, log_path, **_):
         tid, label = Path(log_path).name.split(".")[:2]
@@ -37,17 +40,22 @@ class FakeAdapter:
             raise RuntimeError("adapter should not be called")
         if label == "plan":
             if tid == "6":
-                return {"feasible": False, "question": "which tenant?", "summary": "", "files": [], "steps": [], "risks": [], "planMarkdown": ""}
+                return {"feasible": False, "question": "which tenant?", "summary": "", "files": [], "steps": [], "risks": [],
+                        "planMarkdown": "", "knowledge": []}
             return {"feasible": True, "question": None, "summary": "s", "files": FILES[tid], "steps": [], "risks": [],
-                    "planMarkdown": f"# Plan for {tid}\n"}
+                    "planMarkdown": f"# Plan for {tid}\n", "knowledge": []}
         if label == "implement" or label.startswith("fix"):
             return {"summary": "ok", "checks": [{"cmd": "make lint", "ok": True}], "stuck": None}
         if label.startswith("review"):
-            n = self.reviews[tid] = self.reviews.get(tid, 0) + 1
-            bad = tid == "5" or (tid == "1" and n == 1)
-            return {"verdict": "fix" if bad else "pass",
-                    "findings": [{"severity": "major" if bad else "minor", "file": "a.py", "line": 3, "issue": "x", "fix": None}],
-                    "unmetCriteria": [], "checks": [{"cmd": "make lint", "ok": True}]}
+            round_, lens = label[len("review"):].split("-")
+            bad = tid == "5" or (tid == "1" and round_ == "")
+            if lens == "correctness" and bad:
+                return {"findings": [{"severity": "major", "file": "a.py", "line": 3, "issue": "x", "evidence": "e", "fix": None}]}
+            if lens == "standards":
+                return {"findings": [{"severity": "minor", "file": "a.py", "line": 9, "issue": "Mysterious Name", "evidence": "e", "fix": None}]}
+            return {"findings": []}
+        if label.startswith("verify"):
+            return {"verdict": "refuted" if self.refute else "confirmed", "severity": "major", "reason": "checked"}
         if label == "handoff":
             return {"summary": f"Did {tid}.", "decisions": ["Keep it simple."], "followUps": [], "openFindings": [],
                     "commitMessage": f"feat: ticket {tid}", "prTitle": f"Ticket {tid}", "prChanges": ["Adds it"]}
@@ -73,9 +81,9 @@ class LoopTest(unittest.TestCase):
         run.save()
         return run
 
-    def execute(self, run, adapter):
+    def execute(self, run, adapter, checker=lambda worktree, checks: []):
         with redirect_stdout(io.StringIO()):
-            return runner.Loop(run, adapter).execute()
+            return runner.Loop(run, adapter, checker).execute()
 
     def test_full_run(self):
         fake = FakeAdapter()
@@ -87,7 +95,9 @@ class LoopTest(unittest.TestCase):
         self.assertEqual([(d["ref"], d["reason"]) for d in summary["deferred"]],
                          [("#2", "overlaps #1 on a.py"), ("#4", "overlaps #3 on alembic/versions/")])
         # per-stage tools, and read-only stages flagged
-        self.assertIn(("1", "review", "claude", "check"), fake.calls)
+        self.assertIn(("1", "review-spec", "claude", "check"), fake.calls)
+        self.assertIn(("1", "verify-1", "claude", "check"), fake.calls)          # the skeptic runs with the reviewer's tool
+        self.assertIn(("1", "review1-correctness", "claude", "check"), fake.calls)
         self.assertIn(("1", "plan", "codex", "read"), fake.calls)
         self.assertIn(("1", "implement", "codex", "write"), fake.calls)
         self.assertIn(("1", "fix1", "codex", "write"), fake.calls)
@@ -135,10 +145,54 @@ class LoopTest(unittest.TestCase):
         self.assertEqual([r["ref"] for r in summary["ready"]], ["#7"])
         self.assertEqual(summary["needsHuman"][0]["question"], "implementer failed")
 
+    def test_refuted_findings_do_not_block(self):
+        fake = FakeAdapter(refute=True)
+        summary = self.execute(self.make_run(["1", "5"]), fake)
+        self.assertEqual([(r["ref"], r["rounds"]) for r in summary["ready"]], [("#1", 0), ("#5", 0)])
+        self.assertNotIn("fix1", {c[1] for c in fake.calls})
+
+    def test_without_verify_findings_block_directly(self):
+        fake = FakeAdapter(refute=True)
+        summary = self.execute(self.make_run(["1"], review={"lenses": ["correctness"], "verify": False}), fake)
+        self.assertEqual(summary["ready"][0]["rounds"], 1)
+        self.assertFalse(any(c[1].startswith("verify") for c in fake.calls))
+        self.assertEqual({c[1] for c in fake.calls if c[1].startswith("review")}, {"review-correctness", "review1-correctness"})
+
+    def test_failing_check_goes_to_the_fixer_with_its_output(self):
+        prompts = {}
+        fake = FakeAdapter()
+
+        def recording(**kw):
+            prompts[Path(kw["log_path"]).name.split(".")[1]] = kw["prompt"]
+            return fake(**kw)
+
+        state = {"n": 0}
+
+        def checker(worktree, checks):
+            state["n"] += 1
+            return [{"cmd": "make test", "ok": state["n"] > 1, "tail": "FAILED test_greet - AssertionError"}]
+
+        summary = self.execute(self.make_run(["3"]), recording, checker)
+        self.assertEqual(summary["ready"][0]["rounds"], 1)
+        self.assertIn("[failing check] `make test`", prompts["fix1"])
+        self.assertIn("FAILED test_greet - AssertionError", prompts["fix1"])
+
+    def test_dedupe_keeps_the_worst_per_place(self):
+        merged = runner.dedupe([
+            {"lens": "standards", "severity": "minor", "file": "a.py", "line": 3, "issue": "name"},
+            {"lens": "correctness", "severity": "blocker", "file": "a.py", "line": 3, "issue": "crash"},
+            {"lens": "spec", "severity": "major", "file": None, "line": None, "issue": "Missing ValueError"},
+        ])
+        self.assertEqual(len(merged), 2)
+        worst = next(f for f in merged if f["file"] == "a.py")
+        self.assertEqual((worst["severity"], worst["lens"]), ("blocker", "correctness, standards"))
+
     def test_prompts_render_without_leftover_placeholders(self):
         t = ticket("1")
         loop = runner.Loop(self.make_run(["1"]), FakeAdapter())
-        for name, extra in (("plan", {}), ("implement", {"plan": "p"}), ("review", {"roundNote": ""}),
+        for name, extra in (("plan", {}), ("implement", {"plan": "p"}),
+                            ("review", {"roundNote": "", "lens": "spec", "lensBrief": runner.render("lenses/spec")}),
+                            ("verify", {"lens": "spec", "severity": "major", "finding": "x"}),
                             ("fix", {"round": 1, "findings": "- x"}), ("handoff", {"status": "ready", "plan": "p"})):
             text = runner.render(name, **loop.values(t, **extra))
             self.assertNotIn("{{", text, name)

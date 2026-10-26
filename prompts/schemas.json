@@ -93,95 +93,6 @@
       "stuck"
     ]
   },
-  "review": {
-    "type": "object",
-    "additionalProperties": false,
-    "properties": {
-      "verdict": {
-        "type": "string",
-        "enum": [
-          "pass",
-          "fix"
-        ]
-      },
-      "findings": {
-        "type": "array",
-        "items": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "severity": {
-              "type": "string",
-              "enum": [
-                "blocker",
-                "major",
-                "minor"
-              ]
-            },
-            "file": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "line": {
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "issue": {
-              "type": "string"
-            },
-            "fix": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "severity",
-            "file",
-            "line",
-            "issue",
-            "fix"
-          ]
-        }
-      },
-      "unmetCriteria": {
-        "type": "array",
-        "items": {
-          "type": "string"
-        }
-      },
-      "checks": {
-        "type": "array",
-        "items": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "cmd": {
-              "type": "string"
-            },
-            "ok": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "cmd",
-            "ok"
-          ]
-        }
-      }
-    },
-    "required": [
-      "verdict",
-      "findings",
-      "unmetCriteria",
-      "checks"
-    ]
-  },
   "handoff": {
     "type": "object",
     "additionalProperties": false,
@@ -228,6 +139,93 @@
       "commitMessage",
       "prTitle",
       "prChanges"
+    ]
+  },
+  "findings": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "findings": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "severity": {
+              "type": "string",
+              "enum": [
+                "blocker",
+                "major",
+                "minor"
+              ]
+            },
+            "file": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "line": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "issue": {
+              "type": "string"
+            },
+            "evidence": {
+              "type": "string"
+            },
+            "fix": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "severity",
+            "file",
+            "line",
+            "issue",
+            "evidence",
+            "fix"
+          ]
+        }
+      }
+    },
+    "required": [
+      "findings"
+    ]
+  },
+  "verify": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "verdict": {
+        "type": "string",
+        "enum": [
+          "confirmed",
+          "refuted"
+        ]
+      },
+      "severity": {
+        "type": "string",
+        "enum": [
+          "blocker",
+          "major",
+          "minor"
+        ]
+      },
+      "reason": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "verdict",
+      "severity",
+      "reason"
     ]
   }
 }

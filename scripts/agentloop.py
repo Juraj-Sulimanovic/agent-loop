@@ -89,6 +89,7 @@ DEFAULT_CONFIG = {
     "agentModels": {},
     "agentArgs": {},
     "agentTimeoutMinutes": 30,
+    "review": {"lenses": ["spec", "correctness", "standards"], "verify": True},
     "tracker": {
         "type": "trello",
         "columns": {"ready": "Sprint Backlog", "doing": "In Progress", "review": "Code Review"},
@@ -1129,7 +1130,7 @@ def run_project(p: Project) -> dict:
     cfg = p.config
     return {"root": str(p.root), "dir": str(p.dir), "briefPath": str(p.dir / "brief.md"),
             "knowledgeIndex": str(knowledge.kdir(p.dir) / "INDEX.md") if knowledge.load(p.dir) else "",
-            **{k: cfg[k] for k in ("checks", "exclusive", "maxParallel", "maxFixRounds")}}
+            **{k: cfg[k] for k in ("checks", "exclusive", "maxParallel", "maxFixRounds", "review")}}
 
 
 def cmd_prepare(a) -> None:

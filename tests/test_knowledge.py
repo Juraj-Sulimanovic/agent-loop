@@ -166,8 +166,8 @@ class KnowledgeInTheLoopTest(unittest.TestCase):
                         "planMarkdown": "p", "knowledge": ["daily-sync", "no-such-item"]}
             if label == "implement":
                 return {"summary": "ok", "checks": [], "stuck": None}
-            if label == "review":
-                return {"verdict": "pass", "findings": [], "unmetCriteria": [], "checks": []}
+            if label.startswith("review"):
+                return {"findings": []}
             return {"summary": "s", "decisions": [], "followUps": [], "openFindings": [], "commitMessage": "feat: x",
                     "prTitle": "X", "prChanges": []}
 
@@ -183,7 +183,7 @@ class KnowledgeInTheLoopTest(unittest.TestCase):
         self.assertIn(str(knowledge.kdir(self.state) / "INDEX.md"), prompts["plan"])
         self.assertIn("## Project knowledge for this ticket", prompts["implement"])
         self.assertIn("items/daily-sync/text/sync.md.txt", prompts["implement"])
-        self.assertIn("**Daily sync**", prompts["review"])
+        self.assertIn("**Daily sync**", prompts["review-spec"])
         self.assertNotIn("no-such-item", prompts["implement"])
 
 
