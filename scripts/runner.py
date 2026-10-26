@@ -9,6 +9,7 @@ Agents never write outside their worktree: the runner writes the plan and handof
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 import subprocess
@@ -52,7 +53,8 @@ def claims(plan: dict, exclusive: list[str]) -> set[str]:
     return out
 
 
-LENSES = ("spec", "correctness", "standards")
+LENSES = ("spec", "correctness", "standards", "security")
+DEFAULT_LENSES = ("spec", "correctness", "standards")
 SEVERITY = {"blocker": 0, "major": 1, "minor": 2}
 
 
@@ -86,8 +88,22 @@ def finding_text(f: dict) -> str:
 
 
 def blocking(review: dict) -> bool:
+    """Confirmed blocker or major findings the change introduced, or a failing check."""
     return (any(f["severity"] != "minor" for f in review["findings"])
             or bool(review["unmetCriteria"]) or any(not c["ok"] for c in review["checks"]))
+
+
+def class_key(f: dict) -> tuple[str, str]:
+    return ((f.get("class") or f["issue"][:60]).strip().lower(), f.get("file") or "")
+
+
+def sensitive_matches(paths: list[str], globs: list[str]) -> list[str]:
+    return sorted({p for p in paths for g in globs if fnmatch.fnmatch(p, g) or fnmatch.fnmatch(p, g.rstrip("/") + "/*")})
+
+
+def git_out(worktree: str, *args: str) -> str:
+    r = subprocess.run(["git", "-C", worktree, *args], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else ""
 
 
 def fingerprint(worktree: str) -> str:
@@ -116,7 +132,7 @@ class Run:
     timeout_minutes: int = 30
     agent_args: dict = field(default_factory=dict)
     plan_only: bool = False
-    lock: threading.Lock = field(default_factory=threading.Lock)
+    lock: threading.RLock = field(default_factory=threading.RLock)
 
     @property
     def id(self) -> str:
@@ -133,7 +149,8 @@ class Run:
 
     def state(self) -> dict:
         path = self.dir / "run.json"
-        return json.loads(path.read_text()) if path.is_file() else {}
+        with self.lock:
+            return json.loads(path.read_text()) if path.is_file() else {}
 
     def update(self, **changes) -> None:
         with self.lock:
@@ -144,7 +161,9 @@ class Run:
                     state.setdefault("tickets", {}).setdefault(tid, {}).update(fields)
                 else:
                     state[k] = v
-            (self.dir / "run.json").write_text(json.dumps(state, indent=2))
+            tmp = self.dir / "run.json.tmp"
+            tmp.write_text(json.dumps(state, indent=2))
+            tmp.replace(self.dir / "run.json")  # atomic: a reader never sees half a file
 
     def save(self) -> None:
         """Write everything needed to resume this run."""
@@ -164,8 +183,11 @@ class Loop:
         self.run, self.adapter, self.checker = run, adapter, checker
         self.p = run.project
         review = self.p.get("review") or {}
-        self.lenses = [x for x in review.get("lenses", LENSES) if x in LENSES] or list(LENSES)
+        self.lenses = [x for x in review.get("lenses", DEFAULT_LENSES) if x in LENSES] or list(DEFAULT_LENSES)
         self.verify = review.get("verify", True)
+        self.votes = max(1, int(review.get("votes", 3)))
+        self.review_file = review.get("file", "REVIEW.md")
+        self.sensitive = self.p.get("sensitivePaths") or []
         self.checks = checks_line(self.p.get("checks") or [])
         self.parallel = max(1, min(int(self.p.get("maxParallel") or 10), 16))
         self.max_fix = max(0, min(int(self.p.get("maxFixRounds", 2)), 4))
@@ -233,45 +255,135 @@ class Loop:
         self.run.log(f"{t['ref']} checks: " + (f"failing {', '.join(failed)}" if failed else f"{len(results)} passing"))
         return results
 
-    def review(self, t: dict, plan: dict, round_: int) -> dict | None:
-        """Independent reviewers, one per angle, in parallel; then a skeptic per blocking finding."""
+    # --- review ---------------------------------------------------------------
+
+    def ticket_state(self, t: dict) -> dict:
+        return (self.run.state().get("tickets") or {}).get(t["id"], {})
+
+    def tree(self, t: dict, step: str) -> str:
+        """The staged tree after a build step, recorded once so a resumed run sees the same one."""
+        trees = self.ticket_state(t).get("trees", {})
+        if step not in trees:
+            trees[step] = git_out(t["worktree"], "write-tree")
+            self.run.update(ticket=(t["id"], {"trees": trees}))
+        return trees[step]
+
+    def risk(self, t: dict, plan: dict) -> list[str]:
+        """The sensitive paths the ticket's plan or staged change touches (empty: normal risk)."""
+        if not self.sensitive:
+            return []
+        state = self.ticket_state(t)
+        if "sensitive" in state:
+            return state["sensitive"]
+        changed = git_out(t["worktree"], "diff", "--cached", "--name-only", t["base"]).splitlines()
+        hits = sensitive_matches(list(plan.get("files") or []) + changed, self.sensitive)
+        self.run.update(ticket=(t["id"], {"risk": "high" if hits else "normal", "sensitive": hits}))
+        if hits:
+            self.run.log(f"{t['ref']} high risk: touches {', '.join(hits)}")
+        return hits
+
+    def review_file_note(self, t: dict) -> str:
+        if self.review_file and (Path(t["worktree"]) / self.review_file).is_file():
+            return (f"`{self.review_file}` at the worktree root is the code owners' guidance for review: what matters, "
+                    "what not to flag, which paths to skip. Where it differs from the defaults below, it wins.")
+        return ""
+
+    def scope_note(self, round_: int, prev_tree: str, cur_tree: str, prior: list[dict], responses: list[dict]) -> str:
+        if not round_:
+            return ""
+        answers = {r["n"]: r for r in responses or []}
+        lines = []
+        for n, f in enumerate(prior, 1):
+            a = answers.get(n)
+            reply = f" -- fixer: {a['action']}: {a['note']}" if a else " -- fixer: no answer"
+            lines.append(f"{n}. [{f['severity']}, {f.get('class') or 'unclassified'}] {finding_text(f).splitlines()[0]}{reply}")
+        return "\n".join([
+            "", f"## Scope: re-review round {round_}", "",
+            f"The previous round's findings went to a fixer. Review only what the fix changed: `git diff {prev_tree} {cur_tree}`. "
+            "Report (a) earlier findings that are still unresolved, keeping their class, and (b) problems the fix itself introduced. "
+            "Report nothing else: no new findings in code the fix did not touch, nothing already settled. When the fixer disputed "
+            "a finding with a reason, report it again only if the reason is wrong.", "",
+            "Earlier findings and the fixer's answers:", "", *lines,
+        ])
+
+    def verdict(self, t: dict, plan: dict, label: str, f: dict, votes: int) -> dict | None:
+        """Ask `votes` skeptics to refute the finding; a majority of those who answered decides."""
+        prompt = render("verify", **self.values(t, plan, lens=f["lens"], severity=f["severity"], finding=finding_text(f),
+                                                reviewFileNote=self.review_file_note(t)))
+        labels = [label] if votes == 1 else [f"{label}-v{k + 1}" for k in range(votes)]
+        with ThreadPoolExecutor(len(labels)) as pool:
+            answers = [v for v in pool.map(lambda lab: self.call(t, lab, "review", prompt, "verify"), labels) if v]
+        if not answers:
+            return None
+        confirmed = [v for v in answers if v["verdict"] == "confirmed"]
+        if len(confirmed) * 2 <= len(answers):
+            return {"verdict": "refuted", "reason": next(v["reason"] for v in answers if v["verdict"] == "refuted"),
+                    "votes": f"{len(confirmed)}/{len(answers)}"}
+        severity = sorted((v["severity"] for v in confirmed), key=SEVERITY.get)[len(confirmed) // 2]  # the median grade
+        return {"verdict": "confirmed", "severity": severity, "reason": confirmed[0]["reason"],
+                "votes": f"{len(confirmed)}/{len(answers)}"}
+
+    def review(self, t: dict, plan: dict, round_: int, prior: list[dict] | None = None,
+               responses: list[dict] | None = None, trees: tuple[str, str] = ("", "")) -> dict | None:
+        """Independent reviewers, one per angle, in parallel; then skeptics per blocking finding.
+
+        Round 0 reviews the whole change. Later rounds review only what the last fix changed,
+        against the earlier findings and the fixer's answers, so the loop converges.
+        """
         suffix = str(round_) if round_ else ""
         checks = self.check_results(t, round_)
-        note = f"This is re-review round {round_}: judge the current state, not the history." if round_ else ""
+        sensitive = self.risk(t, plan)
+        lenses = self.lenses + (["security"] if sensitive and "security" not in self.lenses else [])
+        votes = self.votes if sensitive else 1
+        scope = self.scope_note(round_, trees[0], trees[1], prior or [], responses or [])
         checks_note = ("" if self.p.get("checks") else
                        "\nNo checks are configured: run the ones the repository instructions name, and report a failing one as a blocker.")
+        review_note = self.review_file_note(t)
 
         def lens_call(lens: str):
-            brief = render(f"lenses/{lens}", checksNote=checks_note)
-            prompt = render("review", **self.values(t, plan, lens=lens, lensBrief=brief, roundNote=note))
+            brief = render(f"lenses/{lens}", checksNote=checks_note, sensitive=", ".join(sensitive))
+            prompt = render("review", **self.values(t, plan, lens=lens, lensBrief=brief, scopeNote=scope, reviewFileNote=review_note))
             return self.call(t, f"review{suffix}-{lens}", "review", prompt, "findings")
 
-        with ThreadPoolExecutor(len(self.lenses)) as pool:
-            results = list(pool.map(lens_call, self.lenses))
+        with ThreadPoolExecutor(len(lenses)) as pool:
+            results = list(pool.map(lens_call, lenses))
         if all(r is None for r in results):
             return None
-        found = dedupe([dict(f, lens=lens) for lens, r in zip(self.lenses, results) if r for f in r["findings"]])
+        found = dedupe([dict(f, lens=lens) for lens, r in zip(lenses, results) if r for f in r["findings"]])
+        pre_existing = [f for f in found if f.get("introduced") is False]
+        found = [f for f in found if f.get("introduced") is not False]
         to_check = [f for f in found if f["severity"] != "minor"]
         refuted = []
         if self.verify and to_check:
-            def verify_call(i_f):
-                i, f = i_f
-                prompt = render("verify", **self.values(t, plan, lens=f["lens"], severity=f["severity"], finding=finding_text(f)))
-                return self.call(t, f"verify{suffix}-{i + 1}", "review", prompt, "verify")
             with ThreadPoolExecutor(min(len(to_check), 8)) as pool:
-                verdicts = list(pool.map(verify_call, enumerate(to_check)))
+                verdicts = list(pool.map(lambda i_f: self.verdict(t, plan, f"verify{suffix}-{i_f[0] + 1}", i_f[1], votes),
+                                         enumerate(to_check)))
             for f, v in zip(to_check, verdicts):
                 if v is None:
-                    f["verified"] = False  # the skeptic failed: keep the finding, unconfirmed
+                    f["verified"] = False  # every skeptic failed: keep the finding, unconfirmed
                 elif v["verdict"] == "refuted":
-                    f["refuted"] = v["reason"]
+                    f.update(refuted=v["reason"], votes=v["votes"])
                     refuted.append(f)
                 else:
-                    f.update(severity=v["severity"], verified=True, reason=v["reason"])
+                    f.update(severity=v["severity"], verified=True, reason=v["reason"], votes=v["votes"])
             found = [f for f in found if "refuted" not in f]
             if refuted:
-                self.run.log(f"{t['ref']} review{suffix}: {len(refuted)} finding(s) refuted by the skeptic")
-        return {"findings": found, "unmetCriteria": [], "checks": checks, "refuted": refuted}
+                self.run.log(f"{t['ref']} review{suffix}: {len(refuted)} finding(s) refuted by the skeptics")
+        result = {"round": round_, "findings": found, "preExisting": pre_existing, "unmetCriteria": [], "checks": checks,
+                  "refuted": refuted, "sensitive": sensitive}
+        (self.run.dir / f"{t['id']}.round{round_}.json").write_text(json.dumps(result, indent=2))
+        return result
+
+    # --- build: implement, then review and fix until clean -------------------------
+
+    def fix_list(self, review: dict) -> tuple[list[dict], str]:
+        todo = [f for f in review["findings"] if f["severity"] != "minor"]
+        lines = [f"{n}. [{f['severity']}, {f.get('class') or 'unclassified'}; {f['lens']} review] " + finding_text(f).replace("\n", "\n   ")
+                 for n, f in enumerate(todo, 1)]
+        lines += [f"- [unmet criterion] {c}" for c in review["unmetCriteria"]]
+        lines += [f"- [failing check] `{c['cmd']}`" + (f"\n  Output (tail):\n  " + c.get("tail", "").replace("\n", "\n  ") if c.get("tail") else "")
+                  for c in review["checks"] if not c["ok"]]
+        return todo, "\n".join(lines)
 
     def build(self, t: dict, plan: dict) -> dict:
         plan_md = plan.get("planMarkdown") or plan.get("summary", "")
@@ -280,48 +392,77 @@ class Loop:
             return {"status": "needs-human", "why": "implementer failed", "rounds": 0}
         if built.get("stuck"):
             return {"status": "needs-human", "why": built["stuck"], "rounds": 0}
+        prev_tree = self.tree(t, "implement")
         review = self.review(t, plan, 0)
+        pre_existing = list(review["preExisting"]) if review else []
         rounds = 0
         while review and blocking(review) and rounds < self.max_fix:
             rounds += 1
-            todo = [f for f in review["findings"] if f["severity"] != "minor"]
-            lines = [f"- [{f['severity']}, {f['lens']} review] " + finding_text(f).replace("\n", "\n  ") for f in todo]
-            lines += [f"- [unmet criterion] {c}" for c in review["unmetCriteria"]]
-            lines += [f"- [failing check] `{c['cmd']}`" + (f"\n  Output (tail):\n  " + c.get("tail", "").replace("\n", "\n  ") if c.get("tail") else "")
-                      for c in review["checks"] if not c["ok"]]
-            self.call(t, f"fix{rounds}", "fix", render("fix", **self.values(t, plan, round=rounds, findings="\n".join(lines))), "build")
-            review = self.review(t, plan, rounds)
+            todo, lines = self.fix_list(review)
+            fixed = self.call(t, f"fix{rounds}", "fix", render("fix", **self.values(t, plan, round=rounds, findings=lines)), "build")
+            cur_tree = self.tree(t, f"fix{rounds}")
+            last_keys = {class_key(f) for f in todo}
+            review = self.review(t, plan, rounds, prior=todo, responses=(fixed or {}).get("responses"), trees=(prev_tree, cur_tree))
+            prev_tree = cur_tree
+            if not review:
+                break
+            pre_existing += review["preExisting"]
+            repeated = [f for f in review["findings"] if f["severity"] != "minor" and class_key(f) in last_keys]
+            if repeated and blocking(review):
+                f = repeated[0]
+                self.run.update(ticket=(t["id"], {"rounds": rounds}))
+                return {"status": "needs-human", "rounds": rounds, "review": review, "preExisting": pre_existing,
+                        "why": f"the same issue survived a fix ({f.get('class') or f['issue'][:60]}"
+                               f"{' in ' + f['file'] if f.get('file') else ''}); rethink the approach"}
         self.run.update(ticket=(t["id"], {"rounds": rounds}))
         if not review:
-            return {"status": "needs-human", "why": "reviewer failed", "rounds": rounds}
+            return {"status": "needs-human", "why": "reviewer failed", "rounds": rounds, "preExisting": pre_existing}
         if blocking(review):
-            return {"status": "needs-human", "why": f"still failing review after {rounds} fix round(s)", "rounds": rounds, "review": review}
-        return {"status": "ready", "why": "", "rounds": rounds, "review": review}
+            return {"status": "needs-human", "why": f"still failing review after {rounds} fix round(s)", "rounds": rounds,
+                    "review": review, "preExisting": pre_existing}
+        return {"status": "ready", "why": "", "rounds": rounds, "review": review, "preExisting": pre_existing}
+
+    # --- handoff --------------------------------------------------------------
 
     def handoff(self, t: dict, plan: dict, res: dict) -> dict:
         review = res.get("review")
         last = ("Last review findings:\n" + "\n".join(f"- [{f['severity']}] {f.get('file') or ''} {f['issue']}" for f in review["findings"])
                 if review and review["findings"] else "The last review raised nothing.")
         status = res["status"] + (f" ({res['why']})" if res["why"] else "")
+        pre = dedupe(res.get("preExisting") or [])
+        res["preExisting"] = pre
+        sensitive = self.ticket_state(t).get("sensitive") or []
         h = self.call(t, "handoff", "handoff", render(
             "handoff", **self.values(t, status=status, plan=plan.get("planMarkdown") or plan.get("summary", ""),
                                      lastReview=last, whyNote=f"Why it needs a human: {res['why']}." if res["why"] else "",
-                                     summaryNote="; when it needs a human, say why first" if res["why"] else "")), "handoff")
-        self.write_handoff(t, res, h)
+                                     summaryNote="; when it needs a human, say why first" if res["why"] else "",
+                                     preExistingNote=("Problems the reviewers found in code this change did not touch (listed "
+                                                      "separately as pre-existing; do not repeat them in openFindings):\n"
+                                                      + "\n".join(f"- {finding_text(f).splitlines()[0]}" for f in pre)) if pre else "",
+                                     riskNote=(f"This change touches sensitive paths ({', '.join(sensitive)}); say in `risk` what a "
+                                               "human reviewer must check there.") if sensitive else "")), "handoff")
+        self.write_handoff(t, res, h, sensitive)
         return h or {}
 
-    def write_handoff(self, t: dict, res: dict, h: dict | None) -> None:
+    def write_handoff(self, t: dict, res: dict, h: dict | None, sensitive: list[str] | None = None) -> None:
         h = h or {"summary": f"Handoff agent failed. {res['why']}".strip(), "decisions": [], "followUps": [], "openFindings": [],
-                  "commitMessage": "", "prTitle": t["name"], "prChanges": []}
+                  "commitMessage": "", "prTitle": t["name"], "prChanges": [], "testing": "", "risk": "", "revert": ""}
         bullets = lambda xs: "\n".join(f"- {x}" for x in xs) or "- None"  # noqa: E731
-        text = "\n".join([
-            "---", f"id: {t['id']}", f"title: {t['name']}", f"status: {res['status']}", f"branch: {t['branch']}",
-            f"base: {re.sub(r'^origin/', '', t['base'])}", f"worktree: {t['worktree']}", f"card: {t.get('url', '')}",
-            f"updated: {now()}", f"run: {self.run.id}", "---", "",
+        pre = [finding_text(f).splitlines()[0] + (f" [{f['class']}]" if f.get("class") else "") for f in res.get("preExisting") or []]
+        front = ["---", f"id: {t['id']}", f"title: {t['name']}", f"status: {res['status']}", f"branch: {t['branch']}",
+                 f"base: {re.sub(r'^origin/', '', t['base'])}", f"worktree: {t['worktree']}", f"card: {t.get('url', '')}",
+                 f"updated: {now()}", f"run: {self.run.id}", f"risk: {'high' if sensitive else 'normal'}"]
+        if sensitive:
+            front.append(f"sensitive: {', '.join(sensitive)}")
+        text = "\n".join(front + ["---", "",
             "## Summary", h["summary"].strip(), "",
             "## Decisions", bullets(h["decisions"]), "",
             "## Follow-ups", bullets(h["followUps"]), "",
             "## Open review findings", bullets(h["openFindings"]), "",
+            "## Pre-existing issues", bullets(pre), "",
+            "## Testing", (h.get("testing") or "Not stated.").strip(), "",
+            "## Risk", (h.get("risk") or "Not stated.").strip(), "",
+            "## How to revert", (h.get("revert") or "Not stated.").strip(), "",
             "## Commit message", h["commitMessage"].strip(), "",
             "## PR title", h["prTitle"].strip(), "",
             "## PR changes", bullets(h["prChanges"]), "",
@@ -390,7 +531,9 @@ class Loop:
                 done = list(pool.map(lambda tp: self.chain(*tp), batch))
             summary = {
                 "ready": [{"id": r["t"]["id"], "ref": r["t"]["ref"], "name": r["t"]["name"], "branch": r["t"]["branch"],
-                           "rounds": r["rounds"], **{k: r["handoff"].get(k) for k in ("commitMessage", "prTitle", "prChanges")}}
+                           "rounds": r["rounds"], "risk": "high" if (r.get("review") or {}).get("sensitive") else "normal",
+                           "preExisting": len(r.get("preExisting") or []),
+                           **{k: r["handoff"].get(k) for k in ("commitMessage", "prTitle", "prChanges")}}
                           for r in done if r["status"] == "ready"],
                 "needsHuman": needs_human + [{"id": r["t"]["id"], "ref": r["t"]["ref"], "name": r["t"]["name"], "question": r["why"]}
                                              for r in done if r["status"] != "ready"],
@@ -405,7 +548,7 @@ def status_text(state: dict) -> str:
     """A short human report of a run, finished or not."""
     out = [f"Run {state.get('id')} ({'finished ' + state['finished'] if state.get('finished') else 'running'}; started {state.get('started') or state.get('created')})"]
     for tid, t in (state.get("tickets") or {}).items():
-        extra = f", {t['rounds']} fix round(s)" if t.get("rounds") else ""
+        extra = (f", {t['rounds']} fix round(s)" if t.get("rounds") else "") + (", HIGH RISK" if t.get("risk") == "high" else "")
         out.append(f"- {t.get('ref', tid)} {t.get('name', '')}: {t.get('status') or t.get('stage')}{extra}"
                    + (f" ({t['why']})" if t.get("why") else ""))
     s = state.get("summary")

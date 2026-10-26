@@ -85,12 +85,40 @@
           "string",
           "null"
         ]
+      },
+      "responses": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "n": {
+              "type": "integer"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "fixed",
+                "disputed"
+              ]
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "n",
+            "action",
+            "note"
+          ]
+        }
       }
     },
     "required": [
       "summary",
       "checks",
-      "stuck"
+      "stuck",
+      "responses"
     ]
   },
   "handoff": {
@@ -129,6 +157,15 @@
         "items": {
           "type": "string"
         }
+      },
+      "testing": {
+        "type": "string"
+      },
+      "risk": {
+        "type": "string"
+      },
+      "revert": {
+        "type": "string"
       }
     },
     "required": [
@@ -138,7 +175,10 @@
       "openFindings",
       "commitMessage",
       "prTitle",
-      "prChanges"
+      "prChanges",
+      "testing",
+      "risk",
+      "revert"
     ]
   },
   "findings": {
@@ -182,6 +222,12 @@
                 "string",
                 "null"
               ]
+            },
+            "introduced": {
+              "type": "boolean"
+            },
+            "class": {
+              "type": "string"
             }
           },
           "required": [
@@ -190,7 +236,9 @@
             "line",
             "issue",
             "evidence",
-            "fix"
+            "fix",
+            "introduced",
+            "class"
           ]
         }
       }

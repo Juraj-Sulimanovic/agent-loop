@@ -12,9 +12,10 @@ the next.
   worktree, keeps tickets that touch the same files apart, then runs implement → independent
   review → fix (up to N rounds) per ticket in parallel, and writes a handoff note. It runs in the
   background; the status skill reports on it.
-- **A review that holds up.** Parallel spec, correctness and standards reviewers, the checks run
-  by the runner itself, and a skeptic that tries to refute every blocking finding before a fix
-  round is spent on it.
+- **A review that holds up and converges.** The checks run by the runner, parallel spec,
+  correctness and standards reviewers (plus security on sensitive paths), skeptics that try to
+  refute every blocking finding, pre-existing problems kept out of the way, and re-reviews that
+  look only at what the fix changed.
 - **Any tool, per stage.** Each stage runs headless in Claude Code, Codex or Cursor, as the config
   says: for example Codex implements and Claude reviews, so the review is independent.
 - **One confirmation ships it.** The ship skill shows the exact commit, push and `gh pr create`
@@ -109,7 +110,7 @@ In Claude Code they are `/agent-loop:<skill>`; Codex and Cursor pick them up by 
 description.
 
 The skills drive `scripts/agentloop.py`, which also works on its own: `detect`, `init`,
-`doctor`, `statuses`, `brief`, `tickets`, `prepare`, `run`, `status`, `ingest`, `knowledge`, `annotate`, `handoffs`, `mark`, `move`
+`doctor`, `statuses`, `brief`, `tickets`, `prepare`, `run`, `status`, `findings`, `ingest`, `knowledge`, `annotate`, `handoffs`, `mark`, `move`
 (`python3 scripts/agentloop.py --help`).
 
 ## Project knowledge and the decisions log
@@ -154,26 +155,48 @@ their worktree: the runner writes the plans and handoff notes from what they ret
 
 ## Review
 
-Each review round, modelled on multi-agent code review (Anthropic's Code Review for Claude Code)
-and on Matt Pocock's two-axis code-review skill:
+Review runs inside the loop, on every ticket, before anything reaches a person. It is modelled on
+how Anthropic's Claude Code team reviews code (layers of checks, review that converges, rigor
+scaled by risk) and on Matt Pocock's two-axis code-review skill. Each round:
 
-1. **Checks:** the runner itself runs the configured checks in the worktree; a failing one is a
-   blocker, and its output goes to the fixer.
+1. **Checks:** the runner itself runs the configured checks; a failing one is a blocker and its
+   output goes to the fixer.
 2. **Independent reviewers in parallel**, one per angle: **spec** (every acceptance criterion
    met, nothing unasked-for, tests that would catch a regression), **correctness** (edge cases,
-   error handling, security and data handling, tests that test the behaviour) and **standards**
-   (the repository's documented rules, plus the Fowler smell baseline as non-blocking notes).
-3. **A skeptic per blocking finding** tries to refute it, reading the code and running what it
-   cheaply can. Refuted findings are dropped; confirmed ones may be re-graded.
-4. Findings at the same place are merged, keeping the worst. Only confirmed blockers and majors,
-   unmet criteria and failing checks send the ticket back to the fixer.
+   error handling, data handling, tests that test the behaviour), **standards** (the
+   repository's documented rules, plus the Fowler smell baseline as non-blocking notes), and
+   **security** on high-risk changes. Each finding names its bug class and says whether the
+   change introduced it.
+3. **Skeptics try to refute every blocking finding** before a fix round is spent on it: one per
+   finding, or a majority vote of `review.votes` on high-risk changes.
+4. **Pre-existing problems never block.** Findings in code the change did not touch go to the
+   handoff's *Pre-existing issues*, to become tickets.
+
+Then the loop converges instead of cycling:
+
+- A fix answers every finding (fixed, or disputed with a reason) and fixes the whole bug class.
+- Re-reviews look only at what the fix changed (`git diff <before> <after>` of the staged tree),
+  check the earlier findings, and drop a disputed one unless the reason is wrong.
+- If the same class survives a fix, the ticket stops as *needs you: rethink the approach*;
+  `maxFixRounds` is the hard cap.
+
+**Code owners steer it** with a `REVIEW.md` at the repository root (what a failure means here,
+what not to flag, paths to skip): reviewers and skeptics follow it. `agentloop.py findings` lists
+what keeps recurring across runs and where to fix it at the source (a `REVIEW.md` line, an
+`AGENTS.md` rule, a lint rule, the ticket template).
+
+**Risk sets the depth.** A ticket whose plan or change touches `sensitivePaths` (CI workflows,
+migrations, deploy files, auth and billing code; `detect` suggests them) is high risk: it gets
+the security reviewer and voting, its handoff says `risk: high`, and the ship skill lists it
+first with the full diff of the sensitive files and asks for a real human review.
+
+Every handoff records **Testing**, **Risk** and **How to revert**; the ship skill puts them in the
+PR when the template has those sections. Adding them to your PR template is worth it.
 
 ```json
-"review": {"lenses": ["spec", "correctness", "standards"], "verify": true}
+"review": {"lenses": ["spec", "correctness", "standards"], "verify": true, "votes": 3, "file": "REVIEW.md"},
+"sensitivePaths": [".github/workflows/**", "alembic/versions/**", "app/core/auth.py"]
 ```
-
-Fewer lenses or `"verify": false` make a round cheaper. Reviewers and skeptics use the `review`
-stage's tool, so a different tool from the implementer's gives a truly independent review.
 
 ## Runs
 

@@ -6,6 +6,8 @@ Read the staged diff (`git diff --cached {{base}}`) and `AGENTS.md` (or `CLAUDE.
 
 {{lastReview}}
 {{whyNote}}
+{{preExistingNote}}
+{{riskNote}}
 
 Return the handoff the next agents on this project will read:
 - `summary`: two or three sentences, what the change does, in a reviewer's words{{summaryNote}}.
@@ -15,3 +17,6 @@ Return the handoff the next agents on this project will read:
 - `commitMessage`: one line, per the repository conventions.
 - `prTitle`: a sentence, per the repository conventions.
 - `prChanges`: three to five bullets, one behaviour each.
+- `testing`: how the change was verified (the checks, the tests added, anything run by hand) and what it showed.
+- `risk`: what could go wrong once it ships, and who or what would notice.
+- `revert`: how to undo it (a plain revert, or the extra step a migration, data change or config needs).

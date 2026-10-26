@@ -36,6 +36,7 @@ Commands:
                                     after planning (--resume RUN --build carries on with those plans);
                                     --detach runs it in the background
     status [RUN] [--json]           where a run is (default: the latest)
+    findings [--runs N] [--json]    review findings that recur across recent runs, to fix at the source
     ingest PATH ... [--kind K] [--title T] [--date D] [--id ID]
                                     copy a file or folder into the project knowledge, with text versions
     knowledge [--json]              the knowledge index
@@ -89,7 +90,8 @@ DEFAULT_CONFIG = {
     "agentModels": {},
     "agentArgs": {},
     "agentTimeoutMinutes": 30,
-    "review": {"lenses": ["spec", "correctness", "standards"], "verify": True},
+    "review": {"lenses": ["spec", "correctness", "standards"], "verify": True, "votes": 3, "file": "REVIEW.md"},
+    "sensitivePaths": [],
     "tracker": {
         "type": "trello",
         "columns": {"ready": "Sprint Backlog", "doing": "In Progress", "review": "Code Review"},
@@ -846,6 +848,12 @@ def detect(start: Path, tracker_url: str | None) -> dict:
     for f in ("AGENTS.md", "CLAUDE.md", "CONTEXT.md", "CONTRIBUTING.md", "docs/adr", "docs/notes"):
         if (main / f).exists():
             context.append(f + ("/" if (main / f).is_dir() else ""))
+    sensitive = [d + "/**" for d in (".github/workflows", ".gitlab", "alembic/versions", "migrations", "prisma/migrations", "db/migrate")
+                 if (main / d).is_dir()]
+    sensitive += [f for f in (".gitlab-ci.yml", "Dockerfile", "Procfile", "fly.toml", "render.yaml", "vercel.json") if (main / f).is_file()]
+    tracked = git(main, "ls-files", check=False).splitlines()
+    sensitive += sorted(f for f in tracked if re.search(r"(^|/)(auth|security|permissions?|billing|payments?)[^/]*\.\w+$", f)
+                        and not re.search(r"(^|/)tests?/", f))[:10]
     template = next((t for t in (".github/PULL_REQUEST_TEMPLATE.md", ".github/pull_request_template.md",
                                  "docs/pull_request_template.md", "PULL_REQUEST_TEMPLATE.md") if (main / t).is_file()), "")
 
@@ -855,7 +863,7 @@ def detect(start: Path, tracker_url: str | None) -> dict:
         "base": f"origin/{default}",
         "mainWorktree": os.path.relpath(main, root),
         "worktreePath": "{root}/{id}" if bare else "{root}/../{repo}-worktrees/{id}",
-        "setup": setup, "checks": checks, "exclusive": exclusive, "contextFiles": context,
+        "setup": setup, "checks": checks, "exclusive": exclusive, "contextFiles": context, "sensitivePaths": sensitive,
         "pr": {"template": template},
     })
     if tracker_url:
@@ -867,6 +875,7 @@ def detect(start: Path, tracker_url: str | None) -> dict:
             "root": str(root), "main": str(main), "gitDir": str(common), "remote": remote,
             "defaultBranch": default, "store": str(root / ".agent-loop") if bare else str(common / "agent-loop"),
             "makeTargets": targets, "prTemplate": template,
+            "reviewFile": (main / "REVIEW.md").is_file(),
             "agentsForbidCommits": bool(re.search(r"(?i)git commit.{0,120}(confirm|only after)", agents_md)),
             "credentials": {
                 "trello": bool(os.environ.get("TRELLO_KEY") and os.environ.get("TRELLO_TOKEN")),
@@ -1130,7 +1139,7 @@ def run_project(p: Project) -> dict:
     cfg = p.config
     return {"root": str(p.root), "dir": str(p.dir), "briefPath": str(p.dir / "brief.md"),
             "knowledgeIndex": str(knowledge.kdir(p.dir) / "INDEX.md") if knowledge.load(p.dir) else "",
-            **{k: cfg[k] for k in ("checks", "exclusive", "maxParallel", "maxFixRounds", "review")}}
+            **{k: cfg[k] for k in ("checks", "exclusive", "maxParallel", "maxFixRounds", "review", "sensitivePaths")}}
 
 
 def cmd_prepare(a) -> None:
@@ -1238,6 +1247,54 @@ def cmd_mark(a) -> None:
             print(f"logged {len(decisions)} decision(s) in {p.dir / 'decisions.md'}")
 
 
+SUGGEST = {
+    "standards": "a REVIEW.md or AGENTS.md rule, or a lint rule if it is mechanical",
+    "correctness": "an AGENTS.md note on the pattern, or a shared helper or test that makes it impossible",
+    "spec": "the ticket template: acceptance criteria that state this explicitly",
+    "security": "REVIEW.md, and sensitivePaths for the files involved",
+}
+
+
+def cmd_findings(a) -> None:
+    """What the reviewers keep finding across recent runs, so it can be fixed at the source."""
+    p = require_project(a.config)
+    d = runs_dir(p)
+    runs = sorted(x for x in d.iterdir() if x.is_dir()) if d.is_dir() else []
+    groups: dict[str, dict] = {}
+    for run in runs[-a.runs:]:
+        for f in run.glob("*.round*.json"):
+            ticket = f.name.split(".")[0]
+            result = json.loads(f.read_text())
+            for kind, items in (("confirmed", result.get("findings", [])), ("pre-existing", result.get("preExisting", []))):
+                for it in items:
+                    if kind == "confirmed" and it.get("severity") == "minor":
+                        continue
+                    key = (it.get("class") or it["issue"][:60]).strip().lower()
+                    g = groups.setdefault(key, {"class": key, "tickets": set(), "files": set(), "lenses": set(), "kinds": set(),
+                                                "example": it["issue"]})
+                    g["tickets"].add(f"{run.name}/{ticket}")
+                    g["lenses"].update(x.strip() for x in str(it.get("lens", "")).split(",") if x.strip())
+                    g["kinds"].add(kind)
+                    if it.get("file"):
+                        g["files"].add(it["file"])
+    recurring = sorted((g for g in groups.values() if len(g["tickets"]) >= 2), key=lambda g: -len(g["tickets"]))
+    if a.json:
+        print(json.dumps([{**g, "tickets": sorted(g["tickets"]), "files": sorted(g["files"]), "lenses": sorted(g["lenses"]),
+                           "kinds": sorted(g["kinds"])} for g in recurring], indent=2))
+        return
+    if not recurring:
+        print(f"No finding recurred across the last {min(a.runs, len(runs))} run(s).")
+        return
+    print(f"Findings that recur across the last {min(a.runs, len(runs))} run(s), most frequent first:\n")
+    for g in recurring:
+        lens = sorted(g["lenses"])[0] if g["lenses"] else "correctness"
+        print(f"- {g['class']}: {len(g['tickets'])} tickets ({', '.join(sorted(g['kinds']))}; {', '.join(sorted(g['lenses']))})")
+        print(f"  e.g. {g['example'][:160]}")
+        if g["files"]:
+            print(f"  files: {', '.join(sorted(g['files'])[:5])}")
+        print(f"  fix at the source: {SUGGEST.get(lens, SUGGEST['correctness'])}")
+
+
 def cmd_ingest(a) -> None:
     p = require_project(a.config)
     for raw in a.paths:
@@ -1305,6 +1362,8 @@ def main(argv: list[str] | None = None) -> None:
     x = sub.add_parser("status"); x.add_argument("run", nargs="?"); x.add_argument("--json", action="store_true"); x.set_defaults(fn=cmd_status)
     x = sub.add_parser("handoffs"); x.add_argument("--status"); x.set_defaults(fn=cmd_handoffs)
     x = sub.add_parser("mark"); x.add_argument("id"); x.add_argument("status", choices=["ready", "needs-human", "shipped"]); x.add_argument("--pr"); x.set_defaults(fn=cmd_mark)
+    x = sub.add_parser("findings"); x.add_argument("--runs", type=int, default=10); x.add_argument("--json", action="store_true")
+    x.set_defaults(fn=cmd_findings)
     x = sub.add_parser("ingest"); x.add_argument("paths", nargs="+"); x.add_argument("--kind", choices=knowledge.KINDS)
     x.add_argument("--title"); x.add_argument("--date"); x.add_argument("--id"); x.set_defaults(fn=cmd_ingest)
     x = sub.add_parser("knowledge"); x.add_argument("--json", action="store_true"); x.set_defaults(fn=cmd_knowledge)

@@ -33,8 +33,11 @@
       "correctness",
       "standards"
     ],
-    "verify": true
+    "verify": true,
+    "votes": 3,
+    "file": "REVIEW.md"
   },
+  "sensitivePaths": [],
   "tracker": {
     "type": "trello",
     "columns": {

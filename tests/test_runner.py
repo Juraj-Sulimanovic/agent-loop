@@ -91,7 +91,7 @@ class LoopTest(unittest.TestCase):
         self.assertEqual([(r["ref"], r["rounds"]) for r in summary["ready"]], [("#1", 1), ("#3", 0)])
         self.assertEqual(summary["ready"][0]["commitMessage"], "feat: ticket 1")
         self.assertEqual([(n["ref"], n["question"]) for n in summary["needsHuman"]],
-                         [("#6", "which tenant?"), ("#5", "still failing review after 2 fix round(s)")])
+                         [("#6", "which tenant?"), ("#5", "the same issue survived a fix (x in a.py); rethink the approach")])
         self.assertEqual([(d["ref"], d["reason"]) for d in summary["deferred"]],
                          [("#2", "overlaps #1 on a.py"), ("#4", "overlaps #3 on alembic/versions/")])
         # per-stage tools, and read-only stages flagged

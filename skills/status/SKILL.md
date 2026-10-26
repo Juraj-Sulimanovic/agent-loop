@@ -20,6 +20,9 @@ the log the output names). When `finished` is set, report:
   (`handoffs/<id>.md`) and the stage logs in the run folder say what happened.
 - **Deferred:** ref and why.
 
-Point at the ship skill for the ready ones. A run that died mid-way (no `finished`, and its `pid`
+Point at the ship skill for the ready ones, high-risk ones first. Then run
+`$AL findings` and, when something recurs across tickets, say what and where the skill suggests
+fixing it at the source (a `REVIEW.md` line, an `AGENTS.md` rule, a lint rule, the ticket
+template): a fix there saves a review round on every future ticket. A run that died mid-way (no `finished`, and its `pid`
 no longer running) resumes with `$AL run --resume <run id> --detach`: finished agent calls are
 reused, the rest run again.

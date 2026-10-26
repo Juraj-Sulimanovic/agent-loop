@@ -36,12 +36,18 @@ ticket out until the user says how to handle it.
 Build each PR body from the worktree's copy of `pr.template` when the config names one: its
 first line becomes `pr.ticketLine` with `{ref}`, `{id}`, `{url}` and `{name}` filled from the
 handoff (`card` is the URL), and its changes section takes the handoff's **PR changes**
-bullets. Follow the repository's own PR conventions where it has them (a `/pr` skill, the
+bullets. When the template has Testing, Risk or revert sections, fill them from the handoff's
+**Testing**, **Risk** and **How to revert**; when it does not, add those three under the changes
+for a high-risk ticket only. Follow the repository's own PR conventions where it has them (a `/pr` skill, the
 AGENTS.md git section). Without a template the body is the ticket line plus the bullets.
 Write each body to `<dir>/plans/<id>.pr.md`.
 
-For each ticket show the diff stat, the handoff's **Open review findings**, and the exact
-commands:
+List high-risk tickets first (`risk: high` in the handoff). For each of them say plainly that it
+needs a real human review, name the sensitive paths it touches (`sensitive:`), and show the full
+diff of those files, not only the stat; the reviewers went deeper there, but a person signs off.
+
+For every ticket show the diff stat, the handoff's **Open review findings**, its **Pre-existing
+issues** (offer to turn them into tickets), and the exact commands:
 
 ```bash
 git -C <worktree> commit -m "<handoff commit message>"

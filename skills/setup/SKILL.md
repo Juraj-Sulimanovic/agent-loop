@@ -84,6 +84,13 @@ One round:
   `review`, `fix`, `handoff`). When a team's Codex config points at a custom provider that headless
   runs cannot reach, `agentArgs.codex` can carry `["--ignore-user-config"]`.
 
+**Sensitive paths:** confirm the detected `sensitivePaths` (CI workflows, migrations, deploy
+files, auth and billing code). Changes touching them get a security reviewer, three skeptic votes
+per finding, and are marked for a real human review at ship. When the repository has no
+`REVIEW.md` (`facts.reviewFile`), offer to draft a short one from `AGENTS.md` for the user to
+commit: what a failure means in this project, what not to flag, which paths to skip, and that
+every finding needs a file and line.
+
 Keep the detected `exclusive` paths (lockfiles, manifests, migration folders: two tickets that
 both touch one are never built together) and `contextFiles`. Leave `pr.ticketLine` as
 `#### Ticket [{ref}]({url})` unless the PR template shows the team writes the ticket another
