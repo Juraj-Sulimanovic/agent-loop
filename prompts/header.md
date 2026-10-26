@@ -6,6 +6,8 @@ Read `AGENTS.md` (or `CLAUDE.md`) at the root of the worktree before anything el
 
 Never run `git commit`, `git push`, `gh pr create` or anything that changes a remote, a branch or history. Staging with `git add` is allowed and expected. Do not write files outside the worktree.
 
+{{knowledgeNote}}
+
 ## The ticket
 
 {{desc}}

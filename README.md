@@ -81,7 +81,7 @@ parked) and `requirements.md` (what the client asked for and how they judge it).
 
 ### Where things live
 
-| Layout | State (config, sprint, requirements, plans, handoffs, runs) | Ticket worktrees |
+| Layout | State (config, sprint, requirements, knowledge, decisions, plans, handoffs, runs) | Ticket worktrees |
 |---|---|---|
 | Plain clone | `<clone>/.git/agent-loop/`: shared by every worktree, never committed, never in `git status` | `<clone>/../<repo>-worktrees/<id>` |
 | Bare repo with sibling worktrees | `<root>/.agent-loop/` | `<root>/<id>` |
@@ -97,14 +97,39 @@ Both are settings (`worktreePath`, `init --store root|git`).
 | `sprint [ids] [--plan]` | start the loop over ready tickets (or the ids given) in the background; `--plan` stops after planning |
 | `ticket <id> [--plan]` | the same loop on one ticket, even a blocked one |
 | `status [run]` | where a run is: ready to ship, needs you, deferred |
+| `ingest <path>` | add transcripts, documents or test files to the project knowledge, and distil them into the requirements |
 | `ship [ids]` | commit, push, open PRs and move tickets, after one confirmation |
 
 In Claude Code they are `/agent-loop:<skill>`; Codex and Cursor pick them up by name or
 description.
 
 The skills drive `scripts/agentloop.py`, which also works on its own: `detect`, `init`,
-`doctor`, `statuses`, `brief`, `tickets`, `prepare`, `run`, `status`, `handoffs`, `mark`, `move`
+`doctor`, `statuses`, `brief`, `tickets`, `prepare`, `run`, `status`, `ingest`, `knowledge`, `annotate`, `handoffs`, `mark`, `move`
 (`python3 scripts/agentloop.py --help`).
+
+## Project knowledge and the decisions log
+
+Client material lives next to the project's agent-loop state, never in the repository:
+
+```
+knowledge/INDEX.md                 one line per item; the brief lists it
+knowledge/items/<id>/original/     the files as given
+knowledge/items/<id>/text/         readable versions of .docx, .xlsx, .csv, .pdf
+decisions.md                       what shipped tickets decided, newest first
+```
+
+The **ingest** skill adds a transcript, document or folder of test files: it copies them (skipping
+files already there), writes text versions, describes each item, and proposes the requirement
+changes the material settles, with sources, for you to approve into `requirements.md`. The CLI
+behind it: `agentloop.py ingest <path>`, `knowledge`, `annotate <id> --summary … --use …`.
+
+How it reaches agents:
+- **Every session:** the brief quotes `sprint.md`, `requirements.md` and the decisions log, and lists
+  the knowledge index (one line per item, not the content).
+- **Every ticket:** the planner reads the index and picks the items the ticket needs; implement,
+  review and fix get those items' paths.
+- **Every shipped ticket:** `mark <id> shipped` (the ship skill runs it) appends the handoff's
+  decisions to `decisions.md`, so they outlive the 12 newest handoffs the brief shows.
 
 ## Agents per stage
 

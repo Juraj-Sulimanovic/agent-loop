@@ -13,11 +13,15 @@ import json
 import re
 import subprocess
 import threading
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import knowledge  # noqa: E402
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 PROMPTS = PLUGIN_ROOT / "prompts"
@@ -157,10 +161,18 @@ class Loop:
         cached.write_text(json.dumps(result, indent=2))
         return result
 
-    def values(self, t: dict, **extra) -> dict:
+    def knowledge_note(self, picked: dict | None) -> str:
+        """For the planner: where the index is. For later stages: the items the planner picked."""
+        if picked is None:
+            index = self.p.get("knowledgeIndex")
+            return (f"## Project knowledge\n\nClient transcripts, documents and test files are indexed in `{index}`, "
+                    "with paths to readable text versions. Read the index, then only the items this ticket needs.") if index else ""
+        return knowledge.ticket_note(knowledge.resolve(Path(self.p["dir"]), picked.get("knowledge") or []))
+
+    def values(self, t: dict, picked: dict | None = None, **extra) -> dict:
         base = {k: t.get(k, "") for k in ("ref", "name", "url", "worktree", "branch", "base")}
         base.update(desc=t.get("desc") or "(no description)", briefPath=self.p.get("briefPath", ""),
-                    checksLine=self.checks)
+                    checksLine=self.checks, knowledgeNote=self.knowledge_note(picked))
         base["header"] = render("header", **base)
         base.update(extra)
         return base
@@ -175,19 +187,19 @@ class Loop:
             (plans / f"{t['id']}.md").write_text(plan["planMarkdown"].strip() + "\n")
         return plan
 
-    def review(self, t: dict, round_: int) -> dict | None:
+    def review(self, t: dict, plan: dict, round_: int) -> dict | None:
         note = f"This is re-review round {round_}: judge the current state, not the history." if round_ else ""
         label = f"review{round_}" if round_ else "review"
-        return self.call(t, label, "review", render("review", **self.values(t, roundNote=note)), "review")
+        return self.call(t, label, "review", render("review", **self.values(t, plan, roundNote=note)), "review")
 
     def build(self, t: dict, plan: dict) -> dict:
         plan_md = plan.get("planMarkdown") or plan.get("summary", "")
-        built = self.call(t, "implement", "implement", render("implement", **self.values(t, plan=plan_md)), "build")
+        built = self.call(t, "implement", "implement", render("implement", **self.values(t, plan, plan=plan_md)), "build")
         if not built:
             return {"status": "needs-human", "why": "implementer failed", "rounds": 0}
         if built.get("stuck"):
             return {"status": "needs-human", "why": built["stuck"], "rounds": 0}
-        review = self.review(t, 0)
+        review = self.review(t, plan, 0)
         rounds = 0
         while review and blocking(review) and rounds < self.max_fix:
             rounds += 1
@@ -196,8 +208,8 @@ class Loop:
                      + f["issue"] + (f" (suggested: {f['fix']})" if f.get("fix") else "") for f in todo]
             lines += [f"- [unmet criterion] {c}" for c in review["unmetCriteria"]]
             lines += [f"- [failing check] `{c['cmd']}`" for c in review["checks"] if not c["ok"]]
-            self.call(t, f"fix{rounds}", "fix", render("fix", **self.values(t, round=rounds, findings="\n".join(lines))), "build")
-            review = self.review(t, rounds)
+            self.call(t, f"fix{rounds}", "fix", render("fix", **self.values(t, plan, round=rounds, findings="\n".join(lines))), "build")
+            review = self.review(t, plan, rounds)
         self.run.update(ticket=(t["id"], {"rounds": rounds}))
         if not review:
             return {"status": "needs-human", "why": "reviewer failed", "rounds": rounds}

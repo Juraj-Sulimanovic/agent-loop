@@ -36,6 +36,10 @@ Commands:
                                     after planning (--resume RUN --build carries on with those plans);
                                     --detach runs it in the background
     status [RUN] [--json]           where a run is (default: the latest)
+    ingest PATH ... [--kind K] [--title T] [--date D] [--id ID]
+                                    copy a file or folder into the project knowledge, with text versions
+    knowledge [--json]              the knowledge index
+    annotate ID [--summary S] [--use U] [--title T] [--kind K] [--date D] [--status new|distilled]
     handoffs [--status S]           handoff notes as JSON
     mark ID STATUS [--pr URL]       set a handoff's status (ready, needs-human, shipped)
     move ID COLUMN_KEY              move a ticket to a configured column (ready, doing, review) or a named one
@@ -62,6 +66,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import knowledge  # noqa: E402
 NET_TIMEOUT = 15
 
 DEFAULT_CONFIG = {
@@ -711,6 +717,23 @@ def brief(p: Project, s: Snapshot) -> str:
         if text:
             out += ["", f"## {title}", "", text]
 
+    log = p.dir / "decisions.md"
+    if log.is_file():
+        entries = log.read_text().split("\n## ", 1)[1] if "\n## " in log.read_text() else ""
+        if entries:
+            text = "## " + entries.strip()
+            if len(text) > 3000:
+                text = text[:3000].rsplit("\n## ", 1)[0] + f"\n\n… older decisions in `{log}`"
+            out += ["", "## Decisions log (newest first)", "", text.replace("\n## ", "\n### ").replace("## ", "### ", 1)]
+
+    items = knowledge.load(p.dir)
+    if items:
+        out += ["", "## Project knowledge", "",
+                f"Client transcripts, documents and test files, indexed in `{knowledge.kdir(p.dir) / 'INDEX.md'}` "
+                "(file paths and readable text versions there). Confidential: read what a task needs, never copy it "
+                "into code, commits or PR text.", ""]
+        out += [knowledge.index_line(it) for it in sorted(items, key=lambda i: i["date"], reverse=True)]
+
     if s.board.cards:
         out += ["", f"## Board ({s.tracker.kind})"]
         ready = cfg["tracker"]["columns"].get("ready")
@@ -1103,6 +1126,7 @@ def run_project(p: Project) -> dict:
     """The project settings a run needs."""
     cfg = p.config
     return {"root": str(p.root), "dir": str(p.dir), "briefPath": str(p.dir / "brief.md"),
+            "knowledgeIndex": str(knowledge.kdir(p.dir) / "INDEX.md") if knowledge.load(p.dir) else "",
             **{k: cfg[k] for k in ("checks", "exclusive", "maxParallel", "maxFixRounds")}}
 
 
@@ -1203,6 +1227,49 @@ def cmd_mark(a) -> None:
         text = text.replace("\n---", f"\npr: {a.pr}\n---", 1)
     path.write_text(text)
     print(f"{a.id} -> {a.status}")
+    if a.status == "shipped":
+        note = read_handoff(path)
+        decisions = [line[2:].strip() for line in section(note["body"], "Decisions").splitlines() if line.startswith("- ")]
+        ref = tracker_for(p).ref(note["id"])
+        if knowledge.log_decisions(p.dir, ref, note.get("title", ""), decisions, a.pr or note.get("pr")):
+            print(f"logged {len(decisions)} decision(s) in {p.dir / 'decisions.md'}")
+
+
+def cmd_ingest(a) -> None:
+    p = require_project(a.config)
+    for raw in a.paths:
+        try:
+            it = knowledge.ingest(p.dir, Path(raw), a.kind, a.title if len(a.paths) == 1 else None, a.date,
+                                  a.id if len(a.paths) == 1 else None)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"skipped {raw}: {e}", file=sys.stderr)
+            continue
+        dup = f", {len(it['duplicates'])} duplicate(s) skipped" if it["duplicates"] else ""
+        texts = sum(1 for f in it["files"] if f.get("text"))
+        print(json.dumps({"id": it["id"], "kind": it["kind"], "date": it["date"], "files": len(it["files"]),
+                          "textVersions": texts, "note": f"{len(it['files'])} file(s) copied{dup}",
+                          "dir": str(knowledge.kdir(p.dir) / "items" / it["id"])}))
+
+
+def cmd_knowledge(a) -> None:
+    p = require_project(a.config)
+    items = knowledge.load(p.dir)
+    if a.json:
+        print(json.dumps(items, indent=2))
+    elif not items:
+        print("No knowledge yet; add some with `agentloop.py ingest <file or folder>`.")
+    else:
+        print((knowledge.kdir(p.dir) / "INDEX.md").read_text())
+
+
+def cmd_annotate(a) -> None:
+    p = require_project(a.config)
+    try:
+        it = knowledge.annotate(p.dir, a.id, title=a.title, kind=a.kind, date=a.date, summary=a.summary,
+                                useFor=a.use, status=a.status)
+    except KeyError as e:
+        raise SystemExit(str(e))
+    print(knowledge.index_line(it))
 
 
 def cmd_move(a) -> None:
@@ -1235,6 +1302,12 @@ def main(argv: list[str] | None = None) -> None:
     x = sub.add_parser("status"); x.add_argument("run", nargs="?"); x.add_argument("--json", action="store_true"); x.set_defaults(fn=cmd_status)
     x = sub.add_parser("handoffs"); x.add_argument("--status"); x.set_defaults(fn=cmd_handoffs)
     x = sub.add_parser("mark"); x.add_argument("id"); x.add_argument("status", choices=["ready", "needs-human", "shipped"]); x.add_argument("--pr"); x.set_defaults(fn=cmd_mark)
+    x = sub.add_parser("ingest"); x.add_argument("paths", nargs="+"); x.add_argument("--kind", choices=knowledge.KINDS)
+    x.add_argument("--title"); x.add_argument("--date"); x.add_argument("--id"); x.set_defaults(fn=cmd_ingest)
+    x = sub.add_parser("knowledge"); x.add_argument("--json", action="store_true"); x.set_defaults(fn=cmd_knowledge)
+    x = sub.add_parser("annotate"); x.add_argument("id"); x.add_argument("--title"); x.add_argument("--kind", choices=knowledge.KINDS)
+    x.add_argument("--date"); x.add_argument("--summary"); x.add_argument("--use"); x.add_argument("--status", choices=["new", "distilled"])
+    x.set_defaults(fn=cmd_annotate)
     x = sub.add_parser("move"); x.add_argument("id"); x.add_argument("column"); x.set_defaults(fn=cmd_move)
     a = ap.parse_args(argv)
     if getattr(a, "hook", False) and a.max_chars is None:

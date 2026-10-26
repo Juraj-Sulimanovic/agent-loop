@@ -2,6 +2,8 @@ You are reviewing ticket {{ref}} "{{name}}" ({{url}}). The change is uncommitted
 
 Read `AGENTS.md` (or `CLAUDE.md`) at the root of the worktree: its conventions are the review standard. Read the project brief at `{{briefPath}}` for the requirements the ticket serves.
 
+{{knowledgeNote}}
+
 ## The ticket
 
 {{desc}}

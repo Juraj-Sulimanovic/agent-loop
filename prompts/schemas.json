@@ -35,6 +35,12 @@
       },
       "planMarkdown": {
         "type": "string"
+      },
+      "knowledge": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
       }
     },
     "required": [
@@ -44,7 +50,8 @@
       "files",
       "steps",
       "risks",
-      "planMarkdown"
+      "planMarkdown",
+      "knowledge"
     ]
   },
   "build": {
