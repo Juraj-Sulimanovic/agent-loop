@@ -123,6 +123,8 @@ class TrelloBareLayoutTest(Base):
         sh("git", "-C", str(self.root / ".git"), "fetch", "-q", "origin")
         sh("git", "-C", str(self.root / ".git"), "worktree", "add", "-q", str(self.root / "main"), "main")
         sh("git", "-C", str(self.root / ".git"), "worktree", "add", "-q", "-b", "feat/906-already-started", str(self.root / "906"), "origin/main")
+        (self.root / "906" / "work.py").write_text("x = 1\n")   # a worktree with work in it
+        sh("git", "-C", str(self.root / "906"), "add", "work.py")
         (self.root / "main" / ".env").write_text("X=1\n")
         # The 0.1 config shape: must keep working.
         legacy = {"name": "proj", "repo": "o/proj", "setup": ["test -f .env || cp {main}/.env .env"],
@@ -189,8 +191,11 @@ class TrelloBareLayoutTest(Base):
         self.assertEqual(al.git(wt, "branch", "--show-current").strip(), "feat/901-list-the-runs")
         self.assertIn("waiting on #901", out["skipped"][0]["error"])
         again = json.loads(self.run_cli("prepare", "901"))["tickets"][0]
-        self.assertEqual(again["status"], "in-flight")
+        self.assertEqual(again["status"], "ready")      # untouched worktree: reused, not "in flight"
         self.assertNotIn("created", again)
+        (wt / "new.py").write_text("")
+        al.git(wt, "add", "new.py")
+        self.assertEqual(json.loads(self.run_cli("tickets", "901"))[0]["status"], "in-flight")
         forced = json.loads(self.run_cli("prepare", "902", "--force"))["tickets"][0]
         self.assertTrue(forced["created"])
 

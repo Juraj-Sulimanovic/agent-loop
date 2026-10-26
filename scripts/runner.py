@@ -54,9 +54,10 @@ def blocking(review: dict) -> bool:
 
 
 def fingerprint(worktree: str) -> str:
-    """What the worktree holds right now: staged, unstaged and untracked changes."""
+    """The worktree's tracked and staged content. Untracked files are left out: running tests
+    creates caches (`__pycache__`, coverage files) that are not an edit."""
     out = []
-    for args in (["status", "--porcelain"], ["diff", "HEAD"]):
+    for args in (["status", "--porcelain", "--untracked-files=no"], ["diff"], ["diff", "--cached"]):
         r = subprocess.run(["git", "-C", worktree, *args], capture_output=True, text=True)
         out.append(r.stdout)
     return "\n".join(out)

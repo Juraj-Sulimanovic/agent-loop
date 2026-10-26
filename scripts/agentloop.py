@@ -591,6 +591,20 @@ def slug_of(card: dict) -> str:
     return f"{card['id'].lower()}-{words}"[:70].rstrip("-")
 
 
+def worktree_in_use(p: Project, ticket_id: str, path: str) -> bool:
+    """A ticket's worktree holds work when it has changes, commits past the base, or a handoff note.
+    An untouched one (prepared, then deferred) is reused rather than blocking the ticket."""
+    if (p.dir / "handoffs" / f"{ticket_id}.md").is_file():
+        return True
+    wt = Path(path)
+    if not wt.is_dir():
+        return False
+    if git(wt, "status", "--porcelain", "--untracked-files=no", check=False).strip():
+        return True  # untracked files alone (a copied .env, caches) are setup, not work
+    ahead = git(wt, "rev-list", "--count", f"{p.config['base']}..HEAD", check=False).strip()
+    return ahead not in ("", "0")
+
+
 def classify(p: Project, s: Snapshot, card: dict) -> dict:
     """One ticket object: what it is, whether an agent may start it, and on which base."""
     tcfg = p.config["tracker"]
@@ -615,7 +629,7 @@ def classify(p: Project, s: Snapshot, card: dict) -> dict:
     ref = s.tracker.ref
     if pr:
         status, reason = "in-flight", f"PR #{pr['number']} open"
-    elif wt:
+    elif wt and worktree_in_use(p, cid, wt[1]):
         status, reason = "in-flight", f"worktree {wt[1]}"
     elif open_blockers:
         stack = [s.pr_for(b) for b in open_blockers]
