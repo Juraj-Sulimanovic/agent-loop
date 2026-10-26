@@ -11,8 +11,8 @@ The loop leaves changes staged, never committed: many repositories let agents on
 propose, with `git commit`, `git push` and `gh pr create` run after the user confirmed the exact
 command. This skill gathers those commands for every ready ticket and asks once.
 
-The CLI is `scripts/agentloop.py` in this plugin, two directories above this skill's base
-directory: `AL="python3 <base>/../../scripts/agentloop.py"`.
+The CLI is `scripts/agentloop.py` in this plugin, two directories above this SKILL.md:
+`AL="python3 <plugin root>/scripts/agentloop.py"`.
 
 ## 1. Gather
 
@@ -21,7 +21,7 @@ $AL show-config                # repo, pr.template, pr.ticketLine, pr.draft, dir
 $AL handoffs --status ready
 ```
 
-Keep the ids in `$ARGUMENTS` if any were given. For each handoff, in its `worktree`:
+Keep only the ids the user gave, if any. For each handoff, in its `worktree`:
 
 ```bash
 git -C <worktree> status --short          # something must be staged, nothing unstaged
@@ -49,8 +49,8 @@ git -C <worktree> push -u origin <branch>
 gh pr create -R <repo> --head <branch> --base <base> --title "<PR title>" --body-file <body file>   # add --draft when pr.draft is true
 ```
 
-Ask with one multi-select question which tickets to ship (all ready ones listed, recommended
-first). Shipping a ticket means running exactly its three commands.
+Ask the user once which tickets to ship (all ready ones listed; a multi-select question when you
+have a question tool). Shipping a ticket means running exactly its three commands.
 
 ## 3. Ship
 

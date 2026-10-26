@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Set up or reconfigure agent-loop for the repository the session is in. Detects the repo layout, checks, setup commands and PR template, asks for the tracker (Trello, GitHub Projects or Jira) and its columns, writes the config and runs the doctor.
+description: Set up or reconfigure agent-loop for the repository the session is in. Detects the repo layout, checks, setup commands and PR template, asks for the tracker (Trello, GitHub Projects, Jira or a local file) and its columns and which agent tool (Claude Code, Codex, Cursor) runs each stage, writes the config and runs the doctor.
 argument-hint: "[tracker board URL]"
 disable-model-invocation: true
 ---
@@ -9,16 +9,16 @@ disable-model-invocation: true
 
 A short wizard: detect what the repository already says, ask only what it cannot know, write
 the config, prove it works. The CLI is `scripts/agentloop.py` in this plugin, two directories
-above this skill's base directory: `AL="python3 <base>/../../scripts/agentloop.py"`.
+above this SKILL.md: `AL="python3 <plugin root>/scripts/agentloop.py"`.
 
-Ask with the question tool, one round per step, up to four questions per round. Put the
-detected value first and mark it "(Recommended)". Never ask what detection already settled
-unless it looked wrong.
+Ask the user one round per step, a few questions at a time, as multiple choice when you have a
+question tool. Put the detected value first and mark it "(Recommended)". Never ask what
+detection already settled unless it looked wrong.
 
 ## 1. Detect
 
 ```bash
-$AL detect                         # or: $AL detect --tracker-url "<url from $ARGUMENTS>"
+$AL detect                         # or: $AL detect --tracker-url "<board URL the user gave>"
 ```
 
 It prints `facts` (layout, main checkout, default branch, remote, Make targets, PR template,
@@ -31,7 +31,9 @@ Tell the user in three or four lines what you found: repo, layout, where the sta
 
 ## 2. Tracker
 
-If no board URL was given, ask which tracker the team uses: Trello, GitHub Projects or Jira.
+If no board URL was given, ask which tracker the team uses: Trello, GitHub Projects, Jira, or
+none yet (the `file` tracker: tickets in `tickets.json` in the agent-loop folder, a list of
+`{id, name, status, desc, labels, blockers}`; good for trying the loop out).
 Then ask for the board's URL and run `$AL detect --tracker-url "<url>"` again, which fills the
 tracker block:
 
@@ -75,6 +77,12 @@ One round:
 - **Setup** (multi-select): the detected per-worktree commands (copy `.env`, install deps).
 - **Parallel tickets:** 3, 5 or 10 (each ticket costs four to six agents).
 - **Pull requests:** ready for review, or draft.
+- **Agent tools:** which tool runs the loop's stages. Offer the tools that are installed
+  (`claude`, `codex`, `cursor-agent` on the PATH); default every stage to the tool this session
+  runs in. Offer one split: a different tool for `review` than for `implement`, so the review is
+  independent. Writes `agents.default` and any per-stage override (`plan`, `implement`,
+  `review`, `fix`, `handoff`). When a team's Codex config points at a custom provider that headless
+  runs cannot reach, `agentArgs.codex` can carry `["--ignore-user-config"]`.
 
 Keep the detected `exclusive` paths (lockfiles, manifests, migration folders: two tickets that
 both touch one are never built together) and `contextFiles`. Leave `pr.ticketLine` as
@@ -95,4 +103,5 @@ Finish by telling the user:
 - the two files to fill in now, `<dir>/sprint.md` and `<dir>/requirements.md` (offer to draft
   `requirements.md` from the repository's docs if they want);
 - new sessions anywhere in this repository now start with the brief;
-- `/agent-loop:ticket <id> --plan` is the safe first run, then `/agent-loop:sprint`.
+- the ticket skill with `--plan` is the safe first run, then the sprint skill; a run goes on in the
+  background and the status skill reports on it.

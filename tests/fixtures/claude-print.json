@@ -1,0 +1,15 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "result": "{\"files\":[\"a.py\"],\"note\":\"The repository has one file, a.py. It's tracked by git, and there are no untracked files. Nothing was edited.\"}",
+  "structured_output": {
+    "files": [
+      "a.py"
+    ],
+    "note": "The repository has one file, a.py. It's tracked by git, and there are no untracked files. Nothing was edited."
+  },
+  "session_id": "72f5a255-e46d-4262-9e6d-d077550d6219",
+  "num_turns": 4,
+  "total_cost_usd": 0.2223964
+}

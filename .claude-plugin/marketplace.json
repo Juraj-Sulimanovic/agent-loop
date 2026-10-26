@@ -3,12 +3,12 @@
   "name": "agent-loop",
   "description": "Local marketplace for the agent-loop plugin",
   "owner": {
-    "name": "Juraj Sulimanovi\u0107"
+    "name": "Juraj Sulimanović"
   },
   "plugins": [
     {
       "name": "agent-loop",
-      "description": "Project brief at session start, and a plan/implement/review/fix/ship loop over Trello, GitHub Projects or Jira tickets in parallel worktrees.",
+      "description": "Project brief at session start, and a plan/implement/review/fix/ship loop over tickets in parallel worktrees, run by Claude Code, Codex or Cursor.",
       "source": "./"
     }
   ]

@@ -1,0 +1,20 @@
+{
+  "name": "agent-loop",
+  "interface": {
+    "displayName": "agent-loop"
+  },
+  "plugins": [
+    {
+      "name": "agent-loop",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

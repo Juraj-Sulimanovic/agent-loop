@@ -29,8 +29,13 @@ Commands:
     show-config                     the resolved config plus root and dir (JSON)
     brief [--hook] [--json]         the project brief (--hook: SessionStart JSON, silent outside a project)
     tickets [ID ...] [--all]        ticket objects as JSON (default: the ready ones)
-    prepare ID [ID ...] [--force]   create or reuse each ticket's worktree, run setup, print workflow args
+    prepare ID [ID ...] [--force]   create or reuse each ticket's worktree and run setup
                                     (--force: also for blocked tickets, on the configured base)
+    run [ID ...] [--plan] [--force] [--detach] [--resume RUN [--build]]
+                                    the loop over the ids (default: every ready ticket); --plan stops
+                                    after planning (--resume RUN --build carries on with those plans);
+                                    --detach runs it in the background
+    status [RUN] [--json]           where a run is (default: the latest)
     handoffs [--status S]           handoff notes as JSON
     mark ID STATUS [--pr URL]       set a handoff's status (ready, needs-human, shipped)
     move ID COLUMN_KEY              move a ticket to a configured column (ready, doing, review) or a named one
@@ -40,13 +45,16 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -71,6 +79,10 @@ DEFAULT_CONFIG = {
     "contextFiles": [],
     "maxParallel": 10,
     "maxFixRounds": 2,
+    "agents": {"default": "claude", "plan": None, "implement": None, "review": None, "fix": None, "handoff": None},
+    "agentModels": {},
+    "agentArgs": {},
+    "agentTimeoutMinutes": 30,
     "tracker": {
         "type": "trello",
         "columns": {"ready": "Sprint Backlog", "doing": "In Progress", "review": "Code Review"},
@@ -214,8 +226,8 @@ class Tracker:
     kind = ""
     id_pattern = r"\d+"
 
-    def __init__(self, cfg: dict, repo: str):
-        self.cfg, self.repo = cfg, repo
+    def __init__(self, cfg: dict, repo: str, state_dir: Path | None = None):
+        self.cfg, self.repo, self.state_dir = cfg, repo, state_dir
 
     def ref(self, ticket_id: str) -> str:
         return f"#{ticket_id}" if ticket_id.isdigit() else ticket_id
@@ -441,14 +453,55 @@ class JiraTracker(Tracker):
         return ticket_id
 
 
-TRACKERS = {t.kind: t for t in (TrelloTracker, GitHubTracker, JiraTracker)}
+class FileTracker(Tracker):
+    """Tickets in a JSON file in the agent-loop folder: for trying the loop out, and for teams without a board.
+
+    `tickets.json` is a list of {id, name, status, desc?, labels?, blockers?, url?}.
+    """
+
+    kind = "file"
+    id_pattern = r"[A-Za-z][A-Za-z0-9_]*-\d+|\d+"
+
+    @property
+    def path(self) -> Path:
+        return (self.state_dir or Path.cwd()) / self.cfg.get("file", "tickets.json")
+
+    def load(self) -> list[dict]:
+        if not self.path.is_file():
+            raise RuntimeError(f"No tickets file at {self.path}")
+        return json.loads(self.path.read_text())
+
+    def columns(self):
+        c = self.cfg
+        return list(dict.fromkeys([*c["columns"].values(), *c["show"], *c["done"]]))
+
+    def fetch(self):
+        cards = [{
+            "id": self.norm_id(str(t["id"])), "name": t["name"], "url": t.get("url", ""),
+            "status": t.get("status", ""), "desc": t.get("desc", ""), "labels": t.get("labels", []),
+            "blockers": [self.norm_id(str(b)) for b in t.get("blockers", [])]
+                        or text_blockers(t.get("desc", ""), self.cfg.get("blockerSection")),
+        } for t in self.load()]
+        return Board(cards)
+
+    def move(self, ticket_id, column):
+        tickets = self.load()
+        for t in tickets:
+            if self.norm_id(str(t["id"])) == ticket_id:
+                t["status"] = column
+                self.path.write_text(json.dumps(tickets, indent=2) + "\n")
+                return t["name"]
+        raise RuntimeError(f"No ticket {ticket_id} in {self.path}")
+
+
+TRACKERS = {t.kind: t for t in (TrelloTracker, GitHubTracker, JiraTracker, FileTracker)}
 
 
 def tracker_for(p: Project) -> Tracker:
     kind = p.config["tracker"]["type"]
     if kind not in TRACKERS:
         raise SystemExit(f"Unknown tracker type {kind!r}; use one of {', '.join(TRACKERS)}")
-    return TRACKERS[kind](p.config["tracker"], p.config["repo"])
+    return TRACKERS[kind](p.config["tracker"], p.config["repo"], p.dir)
 
 
 def parse_tracker_url(url: str) -> dict:
@@ -839,6 +892,25 @@ def cmd_show_config(a) -> None:
     print(json.dumps({**p.config, "root": str(p.root), "dir": str(p.dir), "main": str(p.main)}, indent=2))
 
 
+AGENT_LOGIN = {"claude": "install Claude Code and run `claude` once to log in",
+               "codex": "codex login", "cursor": "cursor-agent login"}
+
+
+def agent_ready(tool: str) -> tuple[bool, str]:
+    """Whether a headless agent tool is installed and logged in."""
+    cmd = {"claude": ["claude", "--version"], "codex": ["codex", "login", "status"], "cursor": ["cursor-agent", "status"]}.get(tool)
+    if not cmd:
+        return False, f"unknown tool (use {', '.join(AGENT_LOGIN)})"
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False, "not installed"
+    text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", out.stdout + out.stderr).strip()
+    if out.returncode or "not logged in" in text.lower():
+        return False, text.splitlines()[-1] if text else f"exit {out.returncode}"
+    return True, ""
+
+
 def cmd_doctor(a) -> None:
     p = require_project(a.config)
     cfg, results = p.config, []
@@ -848,6 +920,9 @@ def cmd_doctor(a) -> None:
         print(f"{'ok  ' if ok else 'FAIL'} {what}" + (f"\n     fix: {fix}" if fix and not ok else ""))
 
     print(f"config {p.dir / 'config.json'}")
+    for tool in sorted({v for v in cfg["agents"].values() if v}):
+        ok, detail = agent_ready(tool)
+        check(ok, f"agent tool {tool}{': ' + detail if detail else ''}", AGENT_LOGIN.get(tool, ""))
     t = tracker_for(p)
     missing = t.missing_creds()
     check(not missing, f"{t.kind} credentials", missing or "")
@@ -887,8 +962,44 @@ def cmd_doctor(a) -> None:
         raise SystemExit(1)
 
 
+def trim_brief(text: str, limit: int) -> str:
+    """Fit the brief under `limit` characters, dropping the least useful parts first."""
+    if not limit or len(text) <= limit:
+        return text
+    head, _, notes = text.partition("\n## Agent handoffs (newest first)\n")
+    blocks = [b for b in re.split(r"\n(?=### )", notes) if b.strip()]
+    while blocks and len(head) + sum(len(b) for b in blocks) + 60 > limit:
+        blocks.pop()  # oldest handoff first
+    if blocks:
+        head += "\n## Agent handoffs (newest first)\n" + "\n".join(blocks)
+    for pattern in (r"\n## Local worktrees\n.*?(?=\n## |\Z)", r"\nRecently merged: [^\n]*"):
+        if len(head) > limit:
+            head = re.sub(pattern, "", head, flags=re.S)
+    if len(head) > limit:
+        head = head[:limit].rsplit("\n", 1)[0]
+    return head.rstrip() + "\n\n(Brief shortened to fit; `brief.md` in the agent-loop folder has all of it.)\n"
+
+
+def hook_input() -> dict:
+    """The JSON a session hook gets on stdin (Claude Code, Codex and Cursor all send one), if any."""
+    stdin = sys.stdin
+    if stdin is None or stdin.isatty():
+        return {}
+    try:
+        if not select.select([stdin], [], [], 2.0)[0]:
+            return {}  # an open pipe nobody writes to: never hang session start
+    except (ValueError, OSError, io.UnsupportedOperation):
+        pass  # not a real file (tests); just read it
+    try:
+        return json.loads(stdin.read() or "{}")
+    except ValueError:
+        return {}
+
+
 def cmd_brief(a) -> None:
-    p = find_project() if a.hook else require_project(a.config)
+    event = hook_input() if a.hook else {}
+    start = event.get("cwd") or next(iter(event.get("workspace_roots") or []), None)
+    p = find_project(Path(start) if start else None) if a.hook else require_project(a.config)
     if not p:
         return
     text = brief(p, snapshot(p))
@@ -898,12 +1009,16 @@ def cmd_brief(a) -> None:
         pass
     if a.hook:
         intro = ("The agent-loop plugin generated this brief for the project this session runs in. "
-                 "It is current as of session start; refresh it with `/agent-loop:brief`.\n\n")
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": intro + text}}))
+                 "It is current as of session start; the agent-loop brief skill refreshes it.\n\n")
+        context = intro + trim_brief(text, a.max_chars)
+        if "cursor_version" in event:
+            print(json.dumps({"additional_context": context}))
+        else:
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}}))
     elif a.json:
         print(json.dumps({"brief": text, "path": str(p.dir / "brief.md")}))
     else:
-        print(text)
+        print(trim_brief(text, a.max_chars) if a.max_chars else text)
 
 
 def picked_ids(s: Snapshot, raw: list[str]) -> list[str]:
@@ -939,20 +1054,18 @@ def run_setup(p: Project, wt: Path) -> list[dict]:
     return results
 
 
-def cmd_prepare(a) -> None:
-    """Create or reuse each ticket's worktree and print the sprint workflow's args."""
-    p = require_project(a.config)
-    s = snapshot(p)
+def prepare(p: Project, s: Snapshot, ids: list[str], force: bool = False) -> tuple[list[dict], list[dict]]:
+    """Create or reuse each ticket's worktree and run setup; returns (prepared tickets, skipped ones)."""
     by = s.by_id()
     git(p.root, "fetch", "-q", "origin")
     tickets, skipped = [], []
-    for cid in picked_ids(s, a.ids):
+    for cid in ids:
         if cid not in by:
             skipped.append({"id": cid, "error": "not on the board"})
             continue
         t = classify(p, s, by[cid])
         wt = Path(t["worktree"])
-        if t["status"] == "blocked" and not a.force:
+        if t["status"] == "blocked" and not force:
             skipped.append({**t, "error": t["reason"]})
             continue
         if not wt.exists():
@@ -969,10 +1082,93 @@ def cmd_prepare(a) -> None:
             skipped.append({**t, "error": f"setup failed: {failed[0]['cmd']}: {failed[0]['tail']}"})
         else:
             tickets.append(t)
+    return tickets, skipped
+
+
+def run_project(p: Project) -> dict:
+    """The project settings a run needs."""
     cfg = p.config
-    project = {"root": str(p.root), "dir": str(p.dir), "briefPath": str(p.dir / "brief.md"),
-               **{k: cfg[k] for k in ("checks", "exclusive", "maxParallel", "maxFixRounds")}}
-    print(json.dumps({"project": project, "tickets": tickets, "skipped": skipped}, indent=2))
+    return {"root": str(p.root), "dir": str(p.dir), "briefPath": str(p.dir / "brief.md"),
+            **{k: cfg[k] for k in ("checks", "exclusive", "maxParallel", "maxFixRounds")}}
+
+
+def cmd_prepare(a) -> None:
+    p = require_project(a.config)
+    s = snapshot(p)
+    tickets, skipped = prepare(p, s, picked_ids(s, a.ids), a.force)
+    print(json.dumps({"project": run_project(p), "tickets": tickets, "skipped": skipped}, indent=2))
+
+
+def runs_dir(p: Project) -> Path:
+    return p.dir / "runs"
+
+
+def cmd_run(a) -> None:
+    """Start a run (prepare the tickets, then the loop), or resume one."""
+    import runner
+    p = require_project(a.config)
+    if a.resume:
+        run_dir = runs_dir(p) / a.resume
+        if not (run_dir / "run.json").is_file():
+            raise SystemExit(f"No run {a.resume} in {runs_dir(p)}")
+        run = runner.Run.load(run_dir)
+        if a.build and run.plan_only:
+            run.plan_only = False
+            run.update(planOnly=False, finished=None)
+    else:
+        s = snapshot(p)
+        if not s.board.cards:
+            raise SystemExit("\n".join(s.errors) or "The board has no tickets.")
+        if a.ids:
+            ids = picked_ids(s, a.ids)
+        else:
+            ready = p.config["tracker"]["columns"]["ready"]
+            ids = [c["id"] for c in s.board.cards if c["status"] == ready and classify(p, s, c)["status"] == "ready"]
+        if not ids:
+            raise SystemExit("No ready tickets.")
+        tickets, skipped = prepare(p, s, ids, a.force)
+        for x in skipped:
+            print(f"skipped {s.tracker.ref(x['id'])}: {x['error']}", file=sys.stderr)
+        if not tickets:
+            raise SystemExit("Nothing to run.")
+        (p.dir / "brief.md").write_text(brief(p, s))
+        run_dir = runs_dir(p) / time.strftime("%Y%m%d-%H%M%S")
+        run_dir.mkdir(parents=True)
+        run = runner.Run(run_dir, run_project(p), tickets, p.config["agents"], p.config["agentModels"],
+                         p.config["agentTimeoutMinutes"], p.config["agentArgs"], a.plan)
+        run.save()
+        run.update(skipped=[{"id": x["id"], "error": x["error"]} for x in skipped])
+    if a.detach:
+        cmd = [sys.executable, str(Path(__file__).resolve()), "--config", str(p.dir / "config.json"), "run", "--resume", run.id]
+        with open(run.dir / "detached.log", "a") as out:
+            proc = subprocess.Popen(cmd, cwd=p.root, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                    start_new_session=True)
+        run.update(pid=proc.pid)
+        print(json.dumps({"run": run.id, "pid": proc.pid, "log": str(run.dir / "log.txt"),
+                          "tickets": [t["ref"] for t in run.tickets]}))
+        return
+    import adapters
+    summary = runner.Loop(run, adapters.run_agent).execute()
+    print(json.dumps({"run": run.id, **summary}, indent=2))
+
+
+def cmd_status(a) -> None:
+    import runner
+    p = require_project(a.config)
+    d = runs_dir(p)
+    runs = sorted(x.name for x in d.iterdir() if (x / "run.json").is_file()) if d.is_dir() else []
+    if not runs:
+        raise SystemExit("No runs yet.")
+    run_id = a.run or runs[-1]
+    path = d / run_id / "run.json"
+    if not path.is_file():
+        raise SystemExit(f"No run {run_id}; runs: {', '.join(runs[-5:])}")
+    state = json.loads(path.read_text())
+    if a.json:
+        state.pop("prepared", None)
+        print(json.dumps(state, indent=2))
+    else:
+        print(runner.status_text(state))
 
 
 def cmd_handoffs(a) -> None:
@@ -1014,13 +1210,21 @@ def main(argv: list[str] | None = None) -> None:
     x = sub.add_parser("doctor"); x.set_defaults(fn=cmd_doctor)
     x = sub.add_parser("statuses"); x.set_defaults(fn=cmd_statuses)
     x = sub.add_parser("show-config"); x.set_defaults(fn=cmd_show_config)
-    x = sub.add_parser("brief"); x.add_argument("--hook", action="store_true"); x.add_argument("--json", action="store_true"); x.set_defaults(fn=cmd_brief)
+    x = sub.add_parser("brief"); x.add_argument("--hook", action="store_true"); x.add_argument("--json", action="store_true")
+    x.add_argument("--max-chars", type=int, default=None, help="cap the brief (default with --hook: 9000, about 2,300 tokens)")
+    x.set_defaults(fn=cmd_brief)
     x = sub.add_parser("tickets"); x.add_argument("ids", nargs="*"); x.add_argument("--all", action="store_true"); x.set_defaults(fn=cmd_tickets)
     x = sub.add_parser("prepare"); x.add_argument("ids", nargs="+"); x.add_argument("--force", action="store_true"); x.set_defaults(fn=cmd_prepare)
+    x = sub.add_parser("run"); x.add_argument("ids", nargs="*"); x.add_argument("--plan", action="store_true")
+    x.add_argument("--force", action="store_true"); x.add_argument("--resume"); x.add_argument("--detach", action="store_true")
+    x.add_argument("--build", action="store_true", help="with --resume: carry a --plan run on into implementation"); x.set_defaults(fn=cmd_run)
+    x = sub.add_parser("status"); x.add_argument("run", nargs="?"); x.add_argument("--json", action="store_true"); x.set_defaults(fn=cmd_status)
     x = sub.add_parser("handoffs"); x.add_argument("--status"); x.set_defaults(fn=cmd_handoffs)
     x = sub.add_parser("mark"); x.add_argument("id"); x.add_argument("status", choices=["ready", "needs-human", "shipped"]); x.add_argument("--pr"); x.set_defaults(fn=cmd_mark)
     x = sub.add_parser("move"); x.add_argument("id"); x.add_argument("column"); x.set_defaults(fn=cmd_move)
     a = ap.parse_args(argv)
+    if getattr(a, "hook", False) and a.max_chars is None:
+        a.max_chars = 9000
     try:
         a.fn(a)
     except RuntimeError as e:

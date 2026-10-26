@@ -1,0 +1,8 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "duration_ms": 5000,
+  "session_id": "c0ffee",
+  "result": "The repository has one file.\n\n{\"files\": [\"a.py\"], \"note\": null}"
+}

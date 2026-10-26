@@ -17,6 +17,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+sys.stdin = io.StringIO("")  # hooks read stdin; never block on the runner's
 import agentloop as al  # noqa: E402
 
 LISTS = [{"id": "L1", "name": "Sprint Backlog"}, {"id": "L2", "name": "In Progress"},

@@ -1,0 +1,32 @@
+{
+  "name": "agent-loop",
+  "version": "0.3.0",
+  "description": "Start every session already knowing the board, sprint goal, client requirements, open PRs and what other agents did; then plan, implement, review and fix tickets from Trello, GitHub Projects, Jira or a local file in parallel worktrees, with Claude Code, Codex or Cursor running each stage, and ship them on one confirmation.",
+  "author": {
+    "name": "Juraj Sulimanović"
+  },
+  "repository": "https://github.com/Juraj-Sulimanovic/agent-loop",
+  "license": "UNLICENSED",
+  "keywords": [
+    "tickets",
+    "sprint",
+    "worktrees",
+    "code review",
+    "trello",
+    "jira",
+    "github projects"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "agent-loop",
+    "shortDescription": "Project brief plus a parallel ticket loop",
+    "longDescription": "Start every session already knowing the board, sprint goal, client requirements, open PRs and what other agents did; then plan, implement, review and fix tickets from Trello, GitHub Projects, Jira or a local file in parallel worktrees, with Claude Code, Codex or Cursor running each stage, and ship them on one confirmation.",
+    "developerName": "Juraj Sulimanović",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ]
+  }
+}

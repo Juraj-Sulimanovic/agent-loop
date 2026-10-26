@@ -16,6 +16,17 @@
   "contextFiles": [],
   "maxParallel": 10,
   "maxFixRounds": 2,
+  "agents": {
+    "default": "claude",
+    "plan": null,
+    "implement": null,
+    "review": null,
+    "fix": null,
+    "handoff": null
+  },
+  "agentModels": {},
+  "agentArgs": {},
+  "agentTimeoutMinutes": 30,
   "tracker": {
     "type": "trello",
     "columns": {
