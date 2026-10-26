@@ -1,0 +1,17 @@
+{
+  "description": "Inject the project brief (board, sprint, requirements, PRs, agent handoffs) at session start, inside a project that has .agent-loop/config.json",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/agentloop.py\" brief --hook",
+            "timeout": 45
+          }
+        ]
+      }
+    ]
+  }
+}

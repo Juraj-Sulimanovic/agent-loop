@@ -1,0 +1,22 @@
+{
+  "name": "",
+  "repo": "owner/name",
+  "base": "origin/main",
+  "mainWorktree": "main",
+  "branch": "{type}/{slug}",
+  "typeByLabel": {"Bug": "fix", "Chore": "chore"},
+  "defaultType": "feat",
+  "setup": [],
+  "checks": [],
+  "exclusive": [],
+  "contextFiles": ["AGENTS.md"],
+  "maxParallel": 10,
+  "maxFixRounds": 2,
+  "prDraft": false,
+  "trello": {
+    "board": "",
+    "lists": {"ready": "Sprint Backlog", "doing": "In Progress", "review": "Code Review"},
+    "show": ["Sprint Backlog", "In Progress", "Code Review"],
+    "done": ["Done"]
+  }
+}

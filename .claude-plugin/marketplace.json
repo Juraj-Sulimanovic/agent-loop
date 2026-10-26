@@ -1,0 +1,13 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agent-loop",
+  "description": "Local marketplace for the agent-loop plugin",
+  "owner": {"name": "Juraj Sulimanović"},
+  "plugins": [
+    {
+      "name": "agent-loop",
+      "description": "Project brief at session start, and a plan/implement/review/fix/ship loop over Trello tickets in parallel worktrees.",
+      "source": "./"
+    }
+  ]
+}
