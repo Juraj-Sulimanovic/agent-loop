@@ -1,0 +1,11 @@
+{
+  "name": "agent-loop-panel",
+  "version": "0.1.0",
+  "description": "A live pane beside the chat that shows the progress of the current agent-loop run.",
+  "types": "./types/index.d.ts",
+  "license": "MIT",
+  "author": {
+    "name": "Juraj Sulimanović"
+  },
+  "repository": "https://github.com/Juraj-Sulimanovic/agent-loop"
+}

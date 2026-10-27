@@ -46,7 +46,13 @@ The changes stay staged in the worktree until you approve them.
 ```
 /plugin marketplace add Juraj-Sulimanovic/agent-loop
 /plugin install agent-loop@agent-loop
+/plugin install agent-loop-panel@agent-loop      # optional: the live progress pane
 ```
+
+The panel shows the newest run of the project beside the chat: the phases, each ticket with its
+running agent calls, and the last log lines. It opens when a run starts. To open it at any time,
+use `/agent-loop-panel`. The status line also shows the progress. The pane needs a terminal 144
+columns wide when it opens by itself.
 
 ### Codex
 
