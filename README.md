@@ -1,34 +1,16 @@
 # agent-loop
 
-agent-loop lets coding agents do the routine part of a sprint. It gives each agent the full
-project context at the start of a session. It then plans, implements, reviews and fixes the
-tickets on your board, in parallel. You approve the result and merge it.
+agent-loop lets coding agents do the routine part of a sprint, so that you do not have to explain
+the project in each session or move work from one agent to the next.
 
-It works with **Claude Code**, **Codex** and **Cursor**.
+- **Each session starts with a brief:** the board, the sprint goal, the decisions, the project
+  knowledge, the open pull requests and the notes of earlier agents.
+- **The loop does the tickets in parallel:** plan, implement, review, fix. Each ticket has its own
+  git worktree.
+- **You approve and merge.** The agents do not commit, push or merge.
 
-## The problem
-
-When you work with coding agents, two tasks take most of your time:
-
-- You explain the project again in each new session.
-- You give the work of one agent to the next agent.
-
-agent-loop does these two tasks for you.
-
-## What it does
-
-- **Brief at session start.** Each session gets the board, the sprint goal, the decisions log,
-  the project knowledge index, the open pull requests and the notes of earlier agents.
-- **Loop over tickets.** For each ready ticket, it makes a git worktree, a plan, the change, a
-  review and the fixes. Tickets that change the same files do not run together.
-- **Review that converges.** The checks, three parallel reviewers and a skeptic for each
-  blocking finding. A re-review examines only the last fix.
-- **One approval to ship.** You see the exact commit, push and pull request commands. You
-  approve them one time. You merge.
-- **A tool for each stage.** For example, Codex implements and Claude reviews.
-
-Trackers: Trello, GitHub Projects, Jira, or a local `tickets.json` file.
-Repositories: GitHub. A plain clone or a bare repository with worktrees.
+It works with **Claude Code**, **Codex** and **Cursor**, and you can use a different tool for each
+stage. Trackers: Trello, GitHub Projects, Jira or a local `tickets.json` file. Repositories: GitHub.
 
 ## How it works
 
@@ -44,8 +26,7 @@ sprint ──► plan all tickets ──► batch the tickets that do not overla
 ship ──► you approve the commands ──► commit, push, pull request ──► you merge
 ```
 
-The agents do not commit, push or merge. The changes stay staged in the worktree until you
-approve them.
+The changes stay staged in the worktree until you approve them.
 
 ## Quick start
 
@@ -98,13 +79,9 @@ Reload Cursor (**Developer: Reload Window**). Make sure that the plugin shows in
 ## Set up a repository
 
 Open a session in the repository. Use the `setup` skill (in Claude Code: `/agent-loop:setup`).
-
-The skill does these steps:
-
-1. It finds the repository layout, the default branch, the checks and the setup commands.
-2. It asks for the tracker, its columns and the tool for each stage.
-3. It writes the configuration.
-4. It runs `doctor` until all checks pass.
+It finds the layout, the branch, the checks and the setup commands. It asks for the tracker, its
+columns and the tool for each stage. Then it writes the configuration and runs `doctor` until all
+checks pass.
 
 Keep the tracker credentials in environment variables. Do not write them in a file.
 
@@ -168,67 +145,43 @@ ticket for a later run and tells you why.
 
 ## Review
 
-Each ticket gets a review before it gets to you. The review has these steps:
+Each ticket gets a review before it gets to you:
 
-1. **Checks.** The runner runs the configured checks. A check that fails is a blocker. The fixer
-   gets its output.
-2. **Reviewers.** Three reviewers work in parallel:
-   - **spec**: Does the change meet each acceptance criterion?
-   - **correctness**: Edge cases, error handling, data handling, tests.
-   - **standards**: The documented rules of the repository. Common code smells are notes only.
-3. **Skeptics.** For each blocking finding, a skeptic tries to show that the finding is wrong.
-   The fixer gets only the confirmed findings.
-4. **Pre-existing problems.** A problem in code that the change did not touch does not block.
-   The handoff note lists it, so you can make a ticket for it.
+1. **Checks.** The runner runs the configured checks. A failed check is a blocker.
+2. **Reviewers.** Three reviewers work in parallel: **spec** (each acceptance criterion),
+   **correctness** (edge cases, errors, data handling, tests) and **standards** (the rules of the
+   repository; code smells are notes only).
+3. **Skeptics.** For each blocking finding, a skeptic tries to show that it is wrong. The fixer
+   gets only the confirmed findings.
+4. **Pre-existing problems** in code that the change did not touch do not block. The handoff note
+   lists them, so that you can make tickets for them.
 
-The fix rounds converge:
+The fix rounds converge. The fixer answers each finding and fixes all instances of the bug class.
+A re-review examines only the last fix. If the same problem stays after a fix, the loop stops and
+the ticket needs your decision.
 
-- The fixer answers each finding. It fixes the problem, or it gives a reason why the finding is
-  wrong.
-- The fixer fixes all instances of the bug class, not only the reported line.
-- A re-review examines only the last fix and the earlier findings.
-- If the same problem stays after a fix, the loop stops. The ticket then needs your decision.
+**Risk.** A change to a file in `sensitivePaths` (CI, migrations, deployment, authentication,
+billing) is high risk. It gets a security reviewer and three skeptics for each finding. The
+`ship` skill shows its full diff and asks for a careful human review.
 
-### Review depth and risk
+**Guidance.** A `REVIEW.md` file at the root of the repository tells the reviewers what is
+important and what to skip. `agentloop.py findings` shows findings that occur again across runs,
+so that you can fix them at the source.
 
-A ticket is **high risk** when it changes a file in `sensitivePaths`. Examples: CI workflows,
-migrations, deployment files, authentication and billing code.
-
-A high-risk ticket gets:
-
-- a fourth reviewer for security,
-- three skeptics for each blocking finding (the majority decides),
-- a mark in the `ship` skill, which shows the full diff and asks for a careful human review.
-
-### Guidance from code owners
-
-Put a `REVIEW.md` file at the root of the repository. In it, tell the reviewers what is
-important, what not to report and which paths to skip. The reviewers and the skeptics use it.
-
-`agentloop.py findings` shows the findings that occur again and again across runs. Fix them at
-the source: in `REVIEW.md`, in `AGENTS.md`, with a lint rule or in the ticket template.
-
-Each handoff note contains **Testing**, **Risk** and **How to revert**. The `ship` skill puts them
-in the pull request when the template has these sections.
+Each handoff note has **Testing**, **Risk** and **How to revert**. The `ship` skill puts them in the
+pull request when the template has these sections.
 
 ## Project knowledge
 
 Keep meeting transcripts, client documents and test files in the project knowledge. They stay
 in the state folder. They never go into the repository.
 
-To add an item, use the `ingest` skill. The skill does these steps:
+To add an item, use the `ingest` skill. It copies the files, makes a text version of each
+`.docx`, `.xlsx`, `.csv` and `.pdf` file, and writes a summary. Then it proposes changes to the
+repository documents and the tickets. It makes the changes only after your approval.
 
-1. It copies the files. It does not copy a file that is already there.
-2. It writes a text version of each `.docx`, `.xlsx`, `.csv` and `.pdf` file.
-3. It writes a summary of each item.
-4. It proposes changes to the repository documents and the tickets. It makes the changes only
-   after your approval.
-
-The agents get the knowledge in these steps:
-
-- The brief lists each item in one line. It does not include the content.
-- The planner selects the items that a ticket needs.
-- The implement, review and fix steps get the paths of these items.
+The brief lists each item in one line, without the content. The planner selects the items that a
+ticket needs, and the later steps get their paths.
 
 When you ship a ticket, agent-loop adds its decisions to `decisions.md`. The brief shows this
 log in each session.
@@ -283,15 +236,10 @@ To decrease the cost, decrease `review.lenses`, set `review.verify` to `false`, 
 `agentloop.py run` prepares the worktrees, refreshes the brief and runs the loop. With
 `--detach`, it runs in the background.
 
-Each run has a folder in `runs/<run id>/` in the state folder. The folder contains:
-
-- `run.json`: the stage of each ticket and the summary,
-- `log.txt`: the progress,
-- the prompt, the result and the output of each agent call,
-- the findings of each review round (`<id>.round<n>.json`).
-
-If a run stops, run `agentloop.py run --resume <run id>`. The run uses the results that it has
-already and continues.
+Each run has a folder in `runs/<run id>/` in the state folder. It contains `run.json` (the stage
+of each ticket and the summary), `log.txt`, the prompt and result of each agent call, and the
+findings of each review round. If a run stops, run `agentloop.py run --resume <run id>`. It
+continues with the results that it has already.
 
 ## Troubleshooting
 
