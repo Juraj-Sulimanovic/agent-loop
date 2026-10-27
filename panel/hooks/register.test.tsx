@@ -14,6 +14,12 @@ const PANE = {
   },
 } as const
 
+const BAND = (maxRows: number) => ({
+  plugin: 'agent-loop-panel',
+  component: 'AbovePrompt',
+  props: { hasSurvey: false, isWorking: false, maxRows, bodyColumns: 120, scroll: { offset: 0, bodyRows: maxRows }, view: {} },
+}) as const
+
 const STATE = '/repo/.git/agent-loop'
 const RUN = `${STATE}/runs/20261027-113232`
 const NOW = Date.parse('2026-10-27T11:40:00')
@@ -87,4 +93,45 @@ test('without a run the pane says so', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await ui.find({ type: 'Text' }))?.text).toBe('No agent-loop run in this project yet.')
   await ui.unmount()
+})
+
+test('the band above the prompt shows the run, one line per ticket', async ($, on) => {
+  project(on)
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  const band = await $.ui.mount({ ...BAND(8), surface: 'terminal' })
+
+  const header = await band.find({ type: 'Text', text: /agent-loop/ })
+  expect(header?.text).toMatch(/running · 7m28s · Plan 3\/3  Build 2\/2  Review 1\/2  Handoff 1\/2/)
+  expect((await band.find({ type: 'Text', text: /#824/ }))?.text).toMatch(/review-correctness, review-spec · 1 fix round · high risk/)
+  expect((await band.find({ type: 'Text', text: /#825/ }))?.text).toMatch(/✔ #825 Filter runs · ready/)
+  await band.unmount()
+})
+
+test('a short band keeps the header and counts the rest', async ($, on) => {
+  project(on)
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  const band = await $.ui.mount({ ...BAND(3), surface: 'terminal' })
+
+  expect((await band.find({ type: 'Text', text: /#824/ }))?.text).toMatch(/#824/)
+  expect((await band.find({ type: 'Text', text: /^\+[0-9]+ more$/ }))?.text).toBe('+2 more')
+  await band.unmount()
+})
+
+test('without a run the band makes way', async ($, on) => {
+  on('session.root', () => ({ value: '/elsewhere' }))
+  on('process.run', () => ({ value: { exitCode: 128, stdout: '', stderr: '' } }))
+  on('fs.exists', () => ({ value: false }))
+  on('clock.every', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: NOW }))
+  on('command.register', () => ({ value: { command: 'agent-loop-panel' } }))
+  on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
+  on('ui.render', ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine band</Text>
+  })
+  await $.session.start({ cwd: '/elsewhere', surface: 'terminal', isInteractive: true })
+
+  const band = await $.ui.mount({ ...BAND(8), surface: 'terminal' })
+  expect((await band.find({ type: 'Text' }))?.text).toBe('engine band')
+  await band.unmount()
 })

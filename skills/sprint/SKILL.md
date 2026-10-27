@@ -39,7 +39,8 @@ A run can take from a few minutes to one hour. Do not wait for it in this turn. 
 - the run id,
 - the tool for each stage (`agents` in `$AL show-config`),
 - that the status skill or `$AL status` shows the progress. In Claude Code with the
-  `agent-loop-panel` plugin, the progress pane opens by itself (or with `/agent-loop-panel`).
+  `agent-loop-panel` plugin, a band above the prompt shows it live; `/agent-loop-panel` opens
+  the full pane.
 
 ## 3. When the run is complete
 

@@ -11,13 +11,13 @@ import type { PhaseCount, Snapshot, TicketRow } from '../types'
 const PANE = 'agent-loop'
 const POLL_MS = 2000
 const STALLED_MS = 15 * 60 * 1000 // no write for this long, and not finished: probably stopped
+const BAND_AFTER_MS = 30 * 60 * 1000 // the band shows a finished run this long, then makes way
 const PHASES = ['Plan', 'Build', 'Review', 'Handoff'] as const
 
 // Change the tag when Snapshot changes shape: it declines what an earlier version stored.
 const snapshot = atom({ plugin: 'agent-loop-panel', key: 'snapshot' } as const, null, { shape: 'snapshot-1' })
 
 let stateDir: string | null | undefined // undefined: not looked up yet; null: no agent-loop project here
-let openedFor = ''
 
 type Run = {
   id?: string
@@ -138,22 +138,26 @@ const minutes = (ms: number) => {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
 }
 
-function statusLine(s: Snapshot | null): string | undefined {
-  if (!s || s.state !== 'running') return undefined
-  const done = s.tickets.filter(t => t.phase === 'Done').length
-  const active = s.tickets.find(t => t.phase !== 'Done')
-  return `agent-loop ${done}/${s.tickets.length}${active ? ` · ${active.ref} ${active.stage}` : ''}`
-}
-
 async function tick($: EngineInterface) {
   const next = await load($)
   const before = await read($, snapshot)
   if (JSON.stringify(before) !== JSON.stringify(next)) await update($, snapshot, () => next)
-  $.ui.status(statusLine(next))
-  if (next && next.state === 'running' && openedFor !== next.runId) {
-    openedFor = next.runId // open once per run; closing the pane keeps it closed
-    void $.ui.open({ id: PANE, title: 'agent-loop' })
-  }
+}
+
+// --- drawing, shared by the band and the pane ---------------------------------
+
+const icon = (t: TicketRow) =>
+  t.status === 'ready' || t.status === 'planned' ? '✔' : t.status === 'needs-human' ? '✖' : t.status === 'deferred' ? '↷' : '●'
+const tone = (t: TicketRow) =>
+  t.status === 'ready' || t.status === 'planned' ? 'success' : t.status === 'needs-human' ? 'error' : t.status === 'deferred' ? 'warning' : 'suggestion'
+const detail = (t: TicketRow) =>
+  (t.phase === 'Done' ? t.why || t.status : t.running.length ? t.running.join(', ') : t.stage) +
+  (t.rounds ? ` · ${t.rounds} fix round${t.rounds > 1 ? 's' : ''}` : '')
+const stateLabel = { running: 'running', finished: 'finished', stalled: 'no progress for 15 min (stopped?)' } as const
+const stateColor = { running: 'suggestion', finished: 'success', stalled: 'warning' } as const
+
+async function elapsed($: EngineInterface, s: Snapshot) {
+  return minutes((s.state === 'running' ? await $.clock.now() : s.updatedMs) - s.startedMs)
 }
 
 export const register: Register = on => {
@@ -161,7 +165,7 @@ export const register: Register = on => {
     await $.command.register({ name: 'agent-loop-panel', description: 'Show the live progress of the agent-loop run' })
     stateDir = undefined
     await tick($)
-    $.clock.every(POLL_MS, () => tick($))
+    $.clock.every(POLL_MS, () => void tick($))
     return next(e)
   })
 
@@ -173,21 +177,51 @@ export const register: Register = on => {
     return { text: opened.isPlaced ? 'agent-loop pane opened.' : 'agent-loop pane is waiting for a wider terminal.' }
   })
 
+  // The band above the prompt: compact, at the bottom in every layout.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const s = await read($, snapshot)
+    const now = await $.clock.now()
+    const isRecent = s !== null && (s.state !== 'finished' || now - s.updatedMs < BAND_AFTER_MS)
+    if (!s || !isRecent || e.props.hasSurvey) return next(e)
+
+    const { Box, Text } = $.ui.resolve(e)
+    const rows = Math.max(1, e.props.maxRows - 1) // one for the header
+    const shown = s.tickets.length > rows ? s.tickets.slice(0, rows - 1) : s.tickets
+    const phases = s.phases.map(p => `${p.name} ${p.done}/${p.total}`).join('  ')
+
+    return (
+      <Box flexDirection="column">
+        <Text wrap="truncate-end">
+          <Text bold>agent-loop</Text>
+          <Text color={stateColor[s.state]}> {stateLabel[s.state]}</Text>
+          <Text dimColor> · {await elapsed($, s)} · {phases} · /agent-loop-panel for more</Text>
+        </Text>
+        {shown.map(t => (
+          <Text wrap="truncate-end">
+            <Text color={tone(t)}>{icon(t)} </Text>
+            <Text bold>{t.ref}</Text>
+            <Text> {t.name} </Text>
+            <Text dimColor>· {detail(t)}</Text>
+            {t.risk === 'high' && <Text color="warning"> · high risk</Text>}
+          </Text>
+        ))}
+        {shown.length < s.tickets.length && <Text dimColor>+{s.tickets.length - shown.length} more</Text>}
+      </Box>
+    )
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
     const s = await read($, snapshot)
     if (!s) return <Text dimColor>No agent-loop run in this project yet.</Text>
-    const now = await $.clock.now()
-    const elapsed = minutes((s.state === 'running' ? now : s.updatedMs) - s.startedMs)
-    const label = { running: 'running', finished: 'finished', stalled: 'no progress for 15 min (stopped?)' }[s.state]
-    const color = { running: 'suggestion', finished: 'success', stalled: 'warning' }[s.state]
+    const took = await elapsed($, s)
 
     return (
       <Box flexDirection="column">
         <Text>
           <Text bold>run {s.runId}</Text>
-          <Text color={color}> · {label}</Text>
-          <Text dimColor> · {elapsed}{s.tools ? ` · ${s.tools}` : ''}</Text>
+          <Text color={stateColor[s.state]}> · {stateLabel[s.state]}</Text>
+          <Text dimColor> · {took}{s.tools ? ` · ${s.tools}` : ''}</Text>
         </Text>
         <Box flexDirection="row" marginTop={1}>
           <Box flexDirection="column" width={18} borderStyle="round" borderDimColor paddingX={1}>
@@ -205,30 +239,15 @@ export const register: Register = on => {
           </Box>
           <Box flexDirection="column" flexGrow={1} borderStyle="round" borderDimColor paddingX={1}>
             <Text bold>Tickets · {s.tickets.length}</Text>
-            {s.tickets.map(t => {
-              const icon =
-                t.status === 'ready' ? '✔' : t.status === 'needs-human' ? '✖' : t.status === 'deferred' ? '↷' : t.status === 'planned' ? '✔' : '●'
-              const tone =
-                t.status === 'ready' || t.status === 'planned' ? 'success' : t.status === 'needs-human' ? 'error' : t.status === 'deferred' ? 'warning' : 'suggestion'
-              const detail =
-                t.phase === 'Done'
-                  ? t.why || t.status
-                  : t.running.length
-                    ? t.running.join(', ')
-                    : t.stage
-              return (
-                <Text wrap="truncate-end">
-                  <Text color={tone}>{icon} </Text>
-                  <Text bold>{t.ref}</Text>
-                  <Text> {t.name} </Text>
-                  <Text dimColor>
-                    · {detail}
-                    {t.rounds ? ` · ${t.rounds} fix round${t.rounds > 1 ? 's' : ''}` : ''}
-                  </Text>
-                  {t.risk === 'high' && <Text color="warning"> · high risk</Text>}
-                </Text>
-              )
-            })}
+            {s.tickets.map(t => (
+              <Text wrap="truncate-end">
+                <Text color={tone(t)}>{icon(t)} </Text>
+                <Text bold>{t.ref}</Text>
+                <Text> {t.name} </Text>
+                <Text dimColor>· {detail(t)}</Text>
+                {t.risk === 'high' && <Text color="warning"> · high risk</Text>}
+              </Text>
+            ))}
           </Box>
         </Box>
         {s.log.map(line => (

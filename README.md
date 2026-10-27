@@ -49,10 +49,11 @@ The changes stay staged in the worktree until you approve them.
 /plugin install agent-loop-panel@agent-loop      # optional: the live progress pane
 ```
 
-The panel shows the newest run of the project beside the chat: the phases, each ticket with its
-running agent calls, and the last log lines. It opens when a run starts. To open it at any time,
-use `/agent-loop-panel`. The status line also shows the progress. The pane needs a terminal 144
-columns wide when it opens by itself.
+The panel shows the newest run of the project in a band above the prompt: the phases, and one
+line for each ticket with its running agent calls. The band shows while a run continues, and for
+30 minutes after it is complete. For the full view with the log, use `/agent-loop-panel`. Claude
+Code puts that pane beside the chat in the full-screen layout, and above the prompt in the other
+layout.
 
 ### Codex
 
