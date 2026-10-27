@@ -6,23 +6,30 @@ argument-hint: "[run id]"
 
 # Where is the run
 
-The CLI is `scripts/agentloop.py` in this plugin, two directories above this SKILL.md:
+The CLI is `scripts/agentloop.py` in this plugin, two directories above this file:
 `AL="python3 <plugin root>/scripts/agentloop.py"`.
 
 ```bash
-$AL status [run id]          # the latest run when no id is given; --json for everything
+$AL status [run id]          # the latest run if you give no id; --json for all the data
 ```
 
-While it runs, say which stage each ticket is in and how long it has been going (the last lines of
-the log the output names). When `finished` is set, report:
-- **Ready to ship:** ref, name, commit message and the fix rounds it took.
-- **Needs you:** ref and the exact question or blocker. The handoff note in the agent-loop folder
-  (`handoffs/<id>.md`) and the stage logs in the run folder say what happened.
-- **Deferred:** ref and why.
+**While the run continues:** tell the user the stage of each ticket and how long it has run. The
+last lines of the log show this.
 
-Point at the ship skill for the ready ones, high-risk ones first. Then run
-`$AL findings` and, when something recurs across tickets, say what and where the skill suggests
-fixing it at the source (a `REVIEW.md` line, an `AGENTS.md` rule, a lint rule, the ticket
-template): a fix there saves a review round on every future ticket. A run that died mid-way (no `finished`, and its `pid`
-no longer running) resumes with `$AL run --resume <run id> --detach`: finished agent calls are
-reused, the rest run again.
+**When `finished` has a value,** report:
+
+- **Ready to ship:** ref, name, commit message, number of fix rounds. Show high-risk tickets first.
+- **Needs you:** ref, and the exact question or blocker. The handoff note
+  (`handoffs/<id>.md` in the state folder) and the stage logs in the run folder tell what
+  happened.
+- **Deferred:** ref and the reason.
+
+Refer the user to the ship skill for the ready tickets.
+
+Then run `$AL findings`. If a finding occurs on more than one ticket, tell the user what it is and
+where to fix it at the source: a `REVIEW.md` line, an `AGENTS.md` rule, a lint rule or the ticket
+template. A fix at the source saves a review round on each future ticket.
+
+**If a run stopped** before it was complete (no `finished` value, and its `pid` does not run),
+continue it with `$AL run --resume <run id> --detach`. The run uses the agent results that it has
+already.

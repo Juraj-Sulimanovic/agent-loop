@@ -5,6 +5,6 @@
   "duration_ms": 16079,
   "duration_api_ms": 16079,
   "result": "I'll list the repository files without changing anything.Only one project file showed up outside `.git`.\n\n{\"files\": [\"a.py\"], \"note\": \"Only non-.git file found via workspace search; shell listing was unavailable.\"}",
-  "session_id": "fefdae9f-857a-42b4-be16-d350650b1a32",
-  "request_id": "ab0a12c9-4a58-437f-aa4c-ccf664f4e986"
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "request_id": "00000000-0000-0000-0000-000000000000"
 }

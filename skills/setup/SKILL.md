@@ -7,108 +7,120 @@ disable-model-invocation: true
 
 # Set up agent-loop for this repository
 
-A short wizard: detect what the repository already says, ask only what it cannot know, write
-the config, prove it works. The CLI is `scripts/agentloop.py` in this plugin, two directories
-above this SKILL.md: `AL="python3 <plugin root>/scripts/agentloop.py"`.
+Find what the repository already tells you. Ask only for what you cannot find. Write the
+configuration. Then make sure that it works.
 
-Ask the user one round per step, a few questions at a time, as multiple choice when you have a
-question tool. Put the detected value first and mark it "(Recommended)". Never ask what
-detection already settled unless it looked wrong.
+The CLI is `scripts/agentloop.py` in this plugin, two directories above this file:
+`AL="python3 <plugin root>/scripts/agentloop.py"`.
+
+Ask the user one step at a time, with a few questions in each step. Use multiple choice when you
+have a question tool. Put the detected value first and mark it "(Recommended)". Do not ask about
+a value that detection found, unless the value looks wrong.
 
 ## 1. Detect
 
 ```bash
-$AL detect                         # or: $AL detect --tracker-url "<board URL the user gave>"
+$AL detect                                   # or: $AL detect --tracker-url "<board URL>"
 ```
 
-It prints `facts` (layout, main checkout, default branch, remote, Make targets, PR template,
-whether AGENTS.md forbids agent commits, which tracker credentials are exported, any existing
-config) and a suggested `config`. With `facts.existingConfig` set this is a reconfigure: read
-that file and treat its values as the defaults instead of the suggestion.
+The output has two parts:
 
-Tell the user in three or four lines what you found: repo, layout, where the state will live
-(`facts.store`; inside `.git/` for a clone, so it is never committed), checks and setup.
+- `facts`: the layout, the main checkout, the default branch, the remote, the Make targets, the
+  PR template, `reviewFile`, the exported tracker credentials and an existing configuration.
+- `config`: a suggested configuration.
+
+If `facts.existingConfig` has a value, this is a reconfiguration. Use the values in that file as
+the defaults.
+
+Tell the user in three or four lines what you found: the repository, the layout, the state folder
+(`facts.store`) and the checks. For a plain clone, the state folder is in `.git/`. It is never
+committed.
 
 ## 2. Tracker
 
-If no board URL was given, ask which tracker the team uses: Trello, GitHub Projects, Jira, or
-none yet (the `file` tracker: tickets in `tickets.json` in the agent-loop folder, a list of
-`{id, name, status, desc, labels, blockers}`; good for trying the loop out).
-Then ask for the board's URL and run `$AL detect --tracker-url "<url>"` again, which fills the
-tracker block:
+If the user gave no board URL, ask which tracker the team uses:
 
-| Tracker | URL looks like | Credentials (environment only, never a file) |
+| Tracker | URL | Credentials (environment only) |
 |---|---|---|
 | Trello | `https://trello.com/b/<id>/<name>` | `TRELLO_KEY`, `TRELLO_TOKEN` |
 | GitHub Projects | `https://github.com/orgs/<org>/projects/<n>` or `/users/<user>/projects/<n>` | `gh auth refresh -s project` |
-| Jira | `https://<site>.atlassian.net/jira/software/projects/<KEY>/boards/<n>` | `JIRA_EMAIL`, `JIRA_API_TOKEN` (an Atlassian API token) |
+| Jira | `https://<site>.atlassian.net/jira/software/projects/<KEY>/boards/<n>` | `JIRA_EMAIL`, `JIRA_API_TOKEN` |
+| File (no board yet) | none | none; the tickets go in `tickets.json` in the state folder: `[{id, name, status, desc, labels, blockers}]` |
 
-Jira also takes a `jql` for which issues are in play; the default is the project's open
-sprints. Ask only if the team runs Kanban (no sprints); then suggest
-`project = KEY AND statusCategory != Done ORDER BY Rank`. A GitHub project whose column field
-is not called `Status` needs `statusField`.
+Then run `$AL detect --tracker-url "<url>"` again. It fills in the tracker.
 
-When the credentials are missing, give the user the one command to run with `!` (for example
-`! export JIRA_EMAIL=... JIRA_API_TOKEN=...`) and wait. A shell export only reaches this
-session through `!`; also tell them to add it to the shell they start `claude` from.
+- **Jira:** the default `jql` takes the open sprints of the project. If the team uses Kanban,
+  suggest `project = KEY AND statusCategory != Done ORDER BY Rank`.
+- **GitHub Projects:** if the column field has a name other than `Status`, set `statusField`.
+
+If the credentials are missing, give the user the command to run with `!`, for example
+`! export JIRA_EMAIL=... JIRA_API_TOKEN=...`. Wait for the user. Tell the user to also add the
+export to the shell that starts the agent tool.
 
 ## 3. Columns
 
-Write the config so far to a scratch file, then read the board's real column names:
+Write the configuration to a temporary file. Then read the real column names of the board:
 
 ```bash
-$AL --config <scratch file> statuses
+$AL --config <temporary file> statuses
 ```
 
-Ask, offering those names as the options:
-- **Ready:** the column agents pick tickets from (often Sprint Backlog, Todo, Selected for Development).
-- **Doing** and **Review:** where tickets move when work starts and when the PR opens.
-- **Done** (multi-select): the columns that mean the work is merged, so a blocker there is resolved.
+Ask for these columns. Use the real names as the options:
 
-`show` is the columns the brief lists, in board order from Ready through review (skip
-backlog and done columns).
+- **Ready:** the column that the loop takes tickets from.
+- **Doing** and **Review:** where a ticket goes when work starts, and when its PR opens.
+- **Done** (multiple choice): the columns that mean "merged". A blocker in one of these columns
+  is resolved.
+
+Set `show` to the columns that the brief lists: from Ready to Review, in board order.
 
 ## 4. Loop settings
 
-One round:
-- **Checks** (multi-select): the detected lint, typecheck and test commands. Warn when a test
-  command needs a shared database or service: parallel agents will collide on it, so prefer a
-  unit-only target.
-- **Setup** (multi-select): the detected per-worktree commands (copy `.env`, install deps).
-- **Parallel tickets:** 3, 5 or 10 (each ticket costs four to six agents).
+Ask these questions in one step:
+
+- **Checks** (multiple choice): the detected lint, type and test commands. If a test command
+  needs a shared database or service, tell the user that parallel agents will interfere. Suggest
+  a unit-test-only target.
+- **Setup** (multiple choice): the detected commands for a new worktree, for example "copy
+  `.env`" and "install dependencies".
+- **Parallel tickets:** 3, 5 or 10. Each ticket uses four to six agent calls.
 - **Pull requests:** ready for review, or draft.
-- **Agent tools:** which tool runs the loop's stages. Offer the tools that are installed
-  (`claude`, `codex`, `cursor-agent` on the PATH); default every stage to the tool this session
-  runs in. Offer one split: a different tool for `review` than for `implement`, so the review is
-  independent. Writes `agents.default` and any per-stage override (`plan`, `implement`,
-  `review`, `fix`, `handoff`). When a team's Codex config points at a custom provider that headless
-  runs cannot reach, `agentArgs.codex` can carry `["--ignore-user-config"]`.
+- **Agent tools:** the tool for each stage. Offer the installed tools (`claude`, `codex`,
+  `cursor-agent`). The default is the tool of this session. Suggest a different tool for
+  `review` than for `implement`, for an independent review. This sets `agents.default` and the
+  stage overrides (`plan`, `implement`, `review`, `fix`, `handoff`).
 
-**Sensitive paths:** confirm the detected `sensitivePaths` (CI workflows, migrations, deploy
-files, auth and billing code). Changes touching them get a security reviewer, three skeptic votes
-per finding, and are marked for a real human review at ship. When the repository has no
-`REVIEW.md` (`facts.reviewFile`), offer to draft a short one from `AGENTS.md` for the user to
-commit: what a failure means in this project, what not to flag, which paths to skip, and that
-every finding needs a file and line.
+If the Codex configuration of the team uses a custom provider that a headless run cannot reach,
+set `agentArgs.codex` to `["--ignore-user-config"]`.
 
-Keep the detected `exclusive` paths (lockfiles, manifests, migration folders: two tickets that
-both touch one are never built together) and `contextFiles`. Leave `pr.ticketLine` as
-`#### Ticket [{ref}]({url})` unless the PR template shows the team writes the ticket another
-way; then match it (`{ref}`, `{id}`, `{url}` and `{name}` are filled in).
+Then ask about review depth:
 
-## 5. Write and prove
+- **Sensitive paths:** confirm the detected `sensitivePaths` (CI workflows, migrations,
+  deployment files, authentication and billing code). A change to these paths gets a security
+  reviewer and three skeptic votes for each finding. The ship skill marks it for a careful human
+  review.
+- **REVIEW.md:** if `facts.reviewFile` is false, offer a short draft from `AGENTS.md` for the user
+  to commit. It says what a failure is in this project, what not to report, which paths to skip,
+  and that each finding needs a file and a line.
+
+Keep the detected `exclusive` paths and `contextFiles`. Keep `pr.ticketLine` as
+`#### Ticket [{ref}]({url})`, unless the PR template uses a different format. The placeholders
+are `{ref}`, `{id}`, `{url}` and `{name}`.
+
+## 5. Write and test
 
 ```bash
-$AL --config <scratch file> init          # installs it where facts.store says; keeps an existing sprint.md
+$AL --config <temporary file> init          # writes to facts.store; keeps an existing sprint.md
 $AL doctor
 ```
 
-Fix every FAIL line with the user (wrong column name, missing make target, missing scope) and
-rerun the doctor until it passes. Then run `$AL brief` and show its first lines.
+Fix each FAIL line with the user, for example a wrong column name, a missing Make target or a
+missing scope. Run `doctor` again until it passes. Then run `$AL brief` and show its first lines.
 
-Finish by telling the user:
-- the file to fill in now, `<dir>/sprint.md` (goal, must-ship, parked); client material such as
-  meeting transcripts, specs and test files goes in through the ingest skill;
-- new sessions anywhere in this repository now start with the brief;
-- the ticket skill with `--plan` is the safe first run, then the sprint skill; a run goes on in the
-  background and the status skill reports on it.
+Tell the user:
+
+- Write the sprint goal in `<state folder>/sprint.md`.
+- Add meeting transcripts, specifications and test files with the ingest skill.
+- Each new session in this repository starts with the brief.
+- For the first run, use the ticket skill with `--plan`. Then use the sprint skill. A run
+  continues in the background. The status skill shows its progress.

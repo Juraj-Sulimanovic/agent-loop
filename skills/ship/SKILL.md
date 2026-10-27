@@ -7,47 +7,56 @@ disable-model-invocation: true
 
 # Ship the ready tickets
 
-The loop leaves changes staged, never committed: many repositories let agents only stage and
-propose, with `git commit`, `git push` and `gh pr create` run after the user confirmed the exact
-command. This skill gathers those commands for every ready ticket and asks once.
+The loop stages its changes. It does not commit them. Many repositories let an agent run
+`git commit`, `git push` and `gh pr create` only after the user approves the exact command. This
+skill collects these commands for all ready tickets and asks the user one time.
 
-The CLI is `scripts/agentloop.py` in this plugin, two directories above this SKILL.md:
+The CLI is `scripts/agentloop.py` in this plugin, two directories above this file:
 `AL="python3 <plugin root>/scripts/agentloop.py"`.
 
-## 1. Gather
+## 1. Collect
 
 ```bash
 $AL show-config                # repo, pr.template, pr.ticketLine, pr.draft, dir
 $AL handoffs --status ready
 ```
 
-Keep only the ids the user gave, if any. For each handoff, in its `worktree`:
+If the user gave ticket ids, keep only those tickets. For each handoff, in its `worktree`:
 
 ```bash
-git -C <worktree> status --short          # something must be staged, nothing unstaged
+git -C <worktree> status --short          # staged changes must exist; unstaged changes must not
 git -C <worktree> diff --cached --stat
 ```
 
-An unstaged change means someone touched the worktree after the loop; show it and leave that
-ticket out until the user says how to handle it.
+An unstaged change means that a person changed the worktree after the loop. Show the change.
+Do not ship that ticket until the user tells you what to do.
 
-## 2. Propose
+## 2. Prepare
 
-Build each PR body from the worktree's copy of `pr.template` when the config names one: its
-first line becomes `pr.ticketLine` with `{ref}`, `{id}`, `{url}` and `{name}` filled from the
-handoff (`card` is the URL), and its changes section takes the handoff's **PR changes**
-bullets. When the template has Testing, Risk or revert sections, fill them from the handoff's
-**Testing**, **Risk** and **How to revert**; when it does not, add those three under the changes
-for a high-risk ticket only. Follow the repository's own PR conventions where it has them (a `/pr` skill, the
-AGENTS.md git section). Without a template the body is the ticket line plus the bullets.
-Write each body to `<dir>/plans/<id>.pr.md`.
+Write the PR body of each ticket to `<dir>/plans/<id>.pr.md`:
 
-List high-risk tickets first (`risk: high` in the handoff). For each of them say plainly that it
-needs a real human review, name the sensitive paths it touches (`sensitive:`), and show the full
-diff of those files, not only the stat; the reviewers went deeper there, but a person signs off.
+1. Start from the worktree copy of `pr.template`, if the configuration names one.
+2. Replace the first line with `pr.ticketLine`. Fill `{ref}`, `{id}`, `{url}` and `{name}` from the
+   handoff (`card` is the URL).
+3. Put the **PR changes** bullets of the handoff in the changes section.
+4. If the template has Testing, Risk or revert sections, fill them from **Testing**, **Risk** and
+   **How to revert**. If it does not, add these three below the changes for a high-risk ticket
+   only.
+5. Follow the PR conventions of the repository, for example a `/pr` skill or the git section of
+   `AGENTS.md`.
 
-For every ticket show the diff stat, the handoff's **Open review findings**, its **Pre-existing
-issues** (offer to turn them into tickets), and the exact commands:
+Without a template, the body is the ticket line and the bullets.
+
+## 3. Ask
+
+Show the high-risk tickets first (`risk: high` in the handoff). For each one:
+
+- Say that it needs a careful human review.
+- Name the sensitive paths that it changes (`sensitive:`).
+- Show the full diff of those files, not only the stat.
+
+For each ticket, show the diff stat, the **Open review findings**, the **Pre-existing issues**
+(offer to make tickets for them) and the exact commands:
 
 ```bash
 git -C <worktree> commit -m "<handoff commit message>"
@@ -55,17 +64,17 @@ git -C <worktree> push -u origin <branch>
 gh pr create -R <repo> --head <branch> --base <base> --title "<PR title>" --body-file <body file>   # add --draft when pr.draft is true
 ```
 
-Ask the user once which tickets to ship (all ready ones listed; a multi-select question when you
-have a question tool). Shipping a ticket means running exactly its three commands.
+Ask the user one time which tickets to ship. List all ready tickets. Use a multiple-choice
+question when you have a question tool. To ship a ticket is to run exactly its three commands.
 
-## 3. Ship
+## 4. Ship
 
-For each chosen ticket, run its three commands in order; stop that ticket at the first failure
-and report it. After the PR opens:
+For each selected ticket, run its three commands in sequence. If a command fails, stop that
+ticket and report the failure. When the PR is open, run:
 
 ```bash
 $AL mark <id> shipped --pr <pr url>
 $AL move <id> review
 ```
 
-Report the PR links. Merging stays with the user.
+Report the PR links. The user merges.
