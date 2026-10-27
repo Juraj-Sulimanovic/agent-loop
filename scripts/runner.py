@@ -433,8 +433,12 @@ class Loop:
         pre = dedupe(res.get("preExisting") or [])
         res["preExisting"] = pre
         sensitive = self.ticket_state(t).get("sensitive") or []
+        diff = git_out(t["worktree"], "diff", "--cached", t["base"])
+        if len(diff) > 40000:
+            diff = diff[:40000] + "\n… (diff truncated; read the rest with git if you can)"
         h = self.call(t, "handoff", "handoff", render(
             "handoff", **self.values(t, status=status, plan=plan.get("planMarkdown") or plan.get("summary", ""),
+                                     stat=git_out(t["worktree"], "diff", "--cached", "--stat", t["base"]), diff=diff,
                                      lastReview=last, whyNote=f"Why it needs a human: {res['why']}." if res["why"] else "",
                                      summaryNote="; when it needs a human, say why first" if res["why"] else "",
                                      preExistingNote=("Problems the reviewers found in code this change did not touch (listed "

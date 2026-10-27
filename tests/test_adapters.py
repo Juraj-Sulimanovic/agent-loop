@@ -40,6 +40,7 @@ class CommandTest(unittest.TestCase):
 
     def test_cursor_modes(self):
         self.assertEqual(adapters.cursor_cmd(Path("/w"), "read", None, [])[-2:], ["--mode", "plan"])
+        self.assertIn("--trust", adapters.cursor_cmd(Path("/w"), "read", None, []))   # fresh worktrees are untrusted
         self.assertIn("--force", adapters.cursor_cmd(Path("/w"), "check", None, []))
         self.assertEqual(adapters.cursor_cmd(Path("/w"), "write", None, [], resume="abc")[-2:], ["--resume", "abc"])
 

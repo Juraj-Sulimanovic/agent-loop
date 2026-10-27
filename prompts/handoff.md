@@ -1,6 +1,16 @@
 Ticket {{ref}} "{{name}}" ({{url}}) has been implemented in the worktree `{{worktree}}` (your working directory; branch `{{branch}}`, base `{{base}}`). Status: {{status}}. Do not edit any file.
 
-Read the staged diff (`git diff --cached {{base}}`) and `AGENTS.md` (or `CLAUDE.md`) for the commit message and pull request conventions. The plan was:
+Read `AGENTS.md` (or `CLAUDE.md`) for the commit message and pull request conventions. The staged change against `{{base}}`:
+
+```
+{{stat}}
+```
+
+```diff
+{{diff}}
+```
+
+The plan was:
 
 {{plan}}
 

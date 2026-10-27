@@ -136,7 +136,9 @@ def run_codex(prompt, schema, cwd, mode, model, timeout, log_path, extra) -> dic
 # --- Cursor ---------------------------------------------------------------------
 
 def cursor_cmd(cwd: Path, mode: str, model: str | None, extra: list[str], resume: str | None = None) -> list[str]:
-    cmd = ["cursor-agent", "-p", "--output-format", "json", "--workspace", str(cwd)]
+    # --trust: the runner made this worktree from the user's own repository, and headless Cursor
+    # refuses any folder not trusted before.
+    cmd = ["cursor-agent", "-p", "--output-format", "json", "--trust", "--workspace", str(cwd)]
     cmd += ["--mode", "plan"] if mode == "read" else ["--force"]
     if model:
         cmd += ["--model", model]
