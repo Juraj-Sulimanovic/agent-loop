@@ -24,7 +24,31 @@ ticket with the status `ready`. In one line, tell the user which tickets will ru
 not, and why (blocked, already in progress). Then continue. Do not wait. If no ticket is ready,
 say so and stop.
 
-## 2. Start the run in the background
+## 2. Start the run
+
+**In Claude Code (you have the Workflow tool),** run the loop as a Workflow. Claude Code then
+shows its own progress view: the phases, each agent, and keys to look inside and to stop or pause.
+
+1. Prepare the tickets and the run folder:
+
+   ```bash
+   $AL wf start <ids...> > <scratch>/wf-args.json        # add --plan if the user asked for --plan
+   ```
+
+   It writes skipped tickets to stderr. Report them.
+2. Read `<scratch>/wf-args.json` and start the workflow with its content as the arguments (the
+   JSON object itself, not a string):
+
+   ```
+   Workflow({ name: "agent-loop:sprint", args: <the JSON object> })
+   ```
+
+   Asking for this skill is the user's approval to run it.
+3. When the workflow returns, write its result to `<runDir>/summary.json` (`runDir` is in the
+   arguments) and run `$AL wf finish <run>`. The status skill, `findings` and the panel then see
+   the run.
+
+**Without the Workflow tool (Codex, Cursor),** run the loop in the background:
 
 ```bash
 $AL run <ids...> --detach            # add --plan if the user asked for --plan
@@ -32,15 +56,8 @@ $AL run <ids...> --detach            # add --plan if the user asked for --plan
 
 The command prepares a worktree for each ticket, runs the setup commands and refreshes the brief.
 Then it starts the loop in the background and prints `{run, pid, log, tickets}`. It writes
-skipped tickets to stderr. Report them.
-
-A run can take from a few minutes to one hour. Do not wait for it in this turn. Tell the user:
-
-- the run id,
-- the tool for each stage (`agents` in `$AL show-config`),
-- that the status skill or `$AL status` shows the progress. In Claude Code with the
-  `agent-loop-panel` plugin, a band above the prompt shows it live; `/agent-loop-panel` opens
-  the full pane.
+skipped tickets to stderr. Report them. A run can take from a few minutes to one hour. Do not wait
+for it in this turn. Tell the user the run id and that the status skill shows the progress.
 
 ## 3. When the run is complete
 
@@ -53,6 +70,10 @@ Report from `$AL status <run>` (or `--json`):
 
 Then refer the user to the ship skill for the ready tickets.
 
-After a `--plan` run, show the summary and the files of each plan (`summary.plans` in
-`$AL status <run> --json`). Ask if the user wants to continue. If yes, run
-`$AL run --resume <run> --build --detach`. It uses the same plans and starts the implementation.
+After a `--plan` run, show the summary and the files of each plan (`summary.plans`). Ask if the
+user wants to continue. If yes:
+
+- **Workflow:** start the workflow again with the same arguments, `planOnly` set to `false`, and
+  `resumeFromRunId` set to the first workflow's run id. It reuses the plans and starts the
+  implementation.
+- **Runner:** run `$AL run --resume <run> --build --detach`.

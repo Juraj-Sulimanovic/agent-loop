@@ -1,6 +1,6 @@
 You are working on ticket {{ref}} "{{name}}" ({{url}}).
 
-Your working directory is the worktree `{{worktree}}` on branch `{{branch}}`, cut from `{{base}}`. Work only inside it.
+Your working directory is the worktree `{{worktree}}` on branch `{{branch}}`, cut from `{{base}}`. Work only inside it.{{cwdNote}}
 
 Read `AGENTS.md` (or `CLAUDE.md`) at the root of the worktree before anything else and follow it; it overrides general habits. Read the project brief at `{{briefPath}}` for the sprint goal, the client requirements, the rest of the board and what other agents did.
 

@@ -1,4 +1,4 @@
-A reviewer of ticket {{ref}} "{{name}}" reported the finding below about the uncommitted change in the worktree `{{worktree}}` (your working directory; branch `{{branch}}`, base `{{base}}`, diff with `git diff {{base}}`). Your job is to try to **refute** it. Do not edit any file.
+A reviewer of ticket {{ref}} "{{name}}" reported the finding below about the uncommitted change in the worktree `{{worktree}}` (your working directory; branch `{{branch}}`, base `{{base}}`, diff with `git diff {{base}}`). Your job is to try to **refute** it. Do not edit any file.{{cwdNote}}
 
 ## The finding ({{lens}} reviewer, reported as {{severity}})
 

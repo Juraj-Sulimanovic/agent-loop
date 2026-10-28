@@ -1202,6 +1202,97 @@ def cmd_run(a) -> None:
     print(json.dumps({"run": run.id, **summary}, indent=2))
 
 
+def cmd_wf(a) -> None:
+    """The steps of a Claude Code Workflow run that need files or git; the workflow script has neither.
+
+    start     prepare the tickets and the run folder; print the workflow's arguments
+    checks    run the checks in a worktree; report the risky paths and the staged tree
+    handoff   write a ticket's handoff note from <run dir>/<id>.handoff.json
+    finish    record the workflow's summary (<run dir>/summary.json) in run.json
+    """
+    import runner
+    if a.action == "checks":
+        wt = Path(a.target).resolve()
+        p = find_project(wt)
+        if not p:
+            raise SystemExit(f"No agent-loop project for {wt}")
+        changed = git(wt, "diff", "--cached", "--name-only", a.base or p.config["base"], check=False).splitlines()
+        planned = [f for f in (a.files or "").split(",") if f]
+        result = {"checks": runner.run_checks(str(wt), p.config["checks"]),
+                  "sensitive": runner.sensitive_matches(planned + changed, p.config["sensitivePaths"]),
+                  "tree": git(wt, "write-tree", check=False).strip()}
+        if a.run and a.id:
+            run_dir = runs_dir(p) / a.run
+            (run_dir / f"{a.id}.checks{a.round or ''}.json").write_text(json.dumps(result, indent=2))
+            runner.Run.load(run_dir).update(ticket=(a.id, {"stage": f"review{a.round or ''}",
+                                                            "risk": "high" if result["sensitive"] else "normal",
+                                                            "sensitive": result["sensitive"]}))
+        print(json.dumps(result))
+        return
+
+    p = require_project(a.config)
+    if a.action == "start":
+        s = snapshot(p)
+        if not s.board.cards:
+            raise SystemExit("\n".join(s.errors) or "The board has no tickets.")
+        ready = p.config["tracker"]["columns"]["ready"]
+        wanted = ([a.target] if a.target else []) + a.ids
+        ids = picked_ids(s, wanted) if wanted else [c["id"] for c in s.board.cards
+                                                    if c["status"] == ready and classify(p, s, c)["status"] == "ready"]
+        if not ids:
+            raise SystemExit("No ready tickets.")
+        tickets, skipped = prepare(p, s, ids, a.force)
+        for x in skipped:
+            print(f"skipped {s.tracker.ref(x['id'])}: {x['error']}", file=sys.stderr)
+        if not tickets:
+            raise SystemExit("Nothing to run.")
+        (p.dir / "brief.md").write_text(brief(p, s))
+        run_dir = runs_dir(p) / time.strftime("%Y%m%d-%H%M%S")
+        run_dir.mkdir(parents=True)
+        project = run_project(p)
+        run = runner.Run(run_dir, project, tickets, {"default": "workflow"}, plan_only=a.plan)
+        run.save()
+        run.update(skipped=[{"id": x["id"], "error": x["error"]} for x in skipped], started=runner.now(), engine="workflow")
+        review_file = (p.config.get("review") or {}).get("file") or ""
+        for t in tickets:
+            t["reviewFile"] = bool(review_file) and (Path(t["worktree"]) / review_file).is_file()
+        prompts = {f.relative_to(runner.PROMPTS).with_suffix("").as_posix(): f.read_text()
+                   for f in sorted(runner.PROMPTS.rglob("*.md"))}
+        print(json.dumps({
+            "run": run.id, "runDir": str(run_dir), "al": f"python3 {Path(__file__).resolve()}", "stamp": runner.now(),
+            "planOnly": a.plan, "project": project, "tickets": tickets, "prompts": prompts, "schemas": runner.SCHEMAS,
+            "knowledge": [{k: it.get(k) for k in ("id", "title", "kind", "date", "summary")} |
+                          {"files": [{"path": f["path"], "text": f.get("text")} for f in it["files"]]}
+                          for it in knowledge.load(p.dir)],
+        }, indent=2))
+        return
+
+    run_dir = runs_dir(p) / a.target
+    run = runner.Run.load(run_dir)
+    if a.action == "handoff":
+        data = json.loads((run_dir / f"{a.id}.handoff.json").read_text())
+        t = next(x for x in run.tickets if x["id"] == a.id)
+        res = {"status": data.get("status", "needs-human"), "why": data.get("why", ""), "preExisting": data.get("preExisting") or []}
+        path = runner.write_handoff_file(p.dir, run.id, t, res, data, data.get("sensitive") or [])
+        (run_dir / f"{a.id}.review.json").write_text(json.dumps(
+            {"findings": data.get("findings") or [], "preExisting": res["preExisting"]}, indent=2))
+        run.update(ticket=(a.id, {"stage": "done", "status": res["status"], "why": res["why"], "rounds": data.get("rounds", 0),
+                                  "risk": "high" if data.get("sensitive") else "normal"}))
+        print(path)
+    elif a.action == "finish":
+        summary = json.loads((run_dir / "summary.json").read_text())
+        for d in summary.get("deferred", []):
+            run.update(ticket=(d["id"], {"stage": "done", "status": "deferred", "why": d.get("reason", "")}))
+        for n in summary.get("needsHuman", []):
+            if (run.state().get("tickets") or {}).get(n["id"], {}).get("stage") != "done":
+                run.update(ticket=(n["id"], {"stage": "done", "status": "needs-human", "why": n.get("question", "")}))
+        if summary.get("stoppedAfter") == "plan":
+            for plan in summary.get("plans", []):
+                run.update(ticket=(plan["id"], {"stage": "planned", "status": "planned"}))
+        run.update(summary=summary, finished=runner.now())
+        print(f"run {run.id} recorded")
+
+
 def cmd_status(a) -> None:
     import runner
     p = require_project(a.config)
@@ -1263,7 +1354,7 @@ def cmd_findings(a) -> None:
     runs = sorted((x for x in d.iterdir() if x.is_dir()), key=lambda x: x.stat().st_mtime) if d.is_dir() else []
     groups: dict[str, dict] = {}
     for run in runs[-a.runs:]:
-        for f in run.glob("*.round*.json"):
+        for f in [*run.glob("*.round*.json"), *run.glob("*.review.json")]:
             ticket = f.name.split(".")[0]
             result = json.loads(f.read_text())
             for kind, items in (("confirmed", result.get("findings", [])), ("pre-existing", result.get("preExisting", []))):
@@ -1360,6 +1451,12 @@ def main(argv: list[str] | None = None) -> None:
     x = sub.add_parser("run"); x.add_argument("ids", nargs="*"); x.add_argument("--plan", action="store_true")
     x.add_argument("--force", action="store_true"); x.add_argument("--resume"); x.add_argument("--detach", action="store_true")
     x.add_argument("--build", action="store_true", help="with --resume: carry a --plan run on into implementation"); x.set_defaults(fn=cmd_run)
+    x = sub.add_parser("wf", help="steps of a Claude Code Workflow run")
+    x.add_argument("action", choices=["start", "checks", "handoff", "finish"])
+    x.add_argument("target", nargs="?", help="checks: the worktree; handoff/finish: the run id")
+    x.add_argument("ids", nargs="*"); x.add_argument("--plan", action="store_true"); x.add_argument("--force", action="store_true")
+    x.add_argument("--id"); x.add_argument("--run"); x.add_argument("--round", type=int); x.add_argument("--base"); x.add_argument("--files")
+    x.set_defaults(fn=cmd_wf)
     x = sub.add_parser("status"); x.add_argument("run", nargs="?"); x.add_argument("--json", action="store_true"); x.set_defaults(fn=cmd_status)
     x = sub.add_parser("handoffs"); x.add_argument("--status"); x.set_defaults(fn=cmd_handoffs)
     x = sub.add_parser("mark"); x.add_argument("id"); x.add_argument("status", choices=["ready", "needs-human", "shipped"]); x.add_argument("--pr"); x.set_defaults(fn=cmd_mark)

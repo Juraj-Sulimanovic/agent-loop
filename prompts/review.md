@@ -1,4 +1,4 @@
-You are one of several independent reviewers of ticket {{ref}} "{{name}}" ({{url}}), each looking from a different angle. Your angle: **{{lens}}**. The change is uncommitted in the worktree `{{worktree}}` (your working directory) on `{{branch}}`, cut from `{{base}}`. Read it with `git diff {{base}}` plus `git status` for new files, and read the surrounding code where a hunk depends on it. Do not edit any file.
+You are one of several independent reviewers of ticket {{ref}} "{{name}}" ({{url}}), each looking from a different angle. Your angle: **{{lens}}**. The change is uncommitted in the worktree `{{worktree}}` (your working directory) on `{{branch}}`, cut from `{{base}}`. Read it with `git diff {{base}}` plus `git status` for new files, and read the surrounding code where a hunk depends on it. Do not edit any file.{{cwdNote}}
 
 Read `AGENTS.md` (or `CLAUDE.md`) at the root of the worktree and the project brief at `{{briefPath}}` for the conventions and requirements the change must meet.
 {{reviewFileNote}}

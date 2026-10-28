@@ -12,7 +12,7 @@ skill's folder) with the one id the user gave.
 
 Differences from the sprint:
 - A ticket the CLI reports as `blocked` still runs when the user named it, after one line saying
-  what it is waiting on: add `--force` to `$AL run`.
+  what it is waiting on: add `--force` to `$AL wf start` (Workflow) or `$AL run` (runner).
 - Without `--plan`, also show the plan's summary in one line when the run finishes, so the user
   sees the approach the code took (the plan is in the agent-loop folder under `plans/<id>.md`).
 

@@ -116,6 +116,39 @@ def fingerprint(worktree: str) -> str:
     return "\n".join(out)
 
 
+def write_handoff_file(state_dir: Path, run_id: str, t: dict, res: dict, h: dict | None,
+                       sensitive: list[str] | None = None) -> Path:
+    """The handoff note the brief, the ship skill and the decisions log read. `res` is the
+    ticket's result (status, why, preExisting findings); `h` the handoff agent's answer."""
+    h = h or {"summary": f"Handoff agent failed. {res.get('why', '')}".strip(), "decisions": [], "followUps": [],
+              "openFindings": [], "commitMessage": "", "prTitle": t["name"], "prChanges": [], "testing": "", "risk": "", "revert": ""}
+    bullets = lambda xs: "\n".join(f"- {x}" for x in xs or []) or "- None"  # noqa: E731
+    pre = [finding_text(f).splitlines()[0] + (f" [{f['class']}]" if f.get("class") else "") for f in res.get("preExisting") or []]
+    front = ["---", f"id: {t['id']}", f"title: {t['name']}", f"status: {res['status']}", f"branch: {t['branch']}",
+             f"base: {re.sub(r'^origin/', '', t['base'])}", f"worktree: {t['worktree']}", f"card: {t.get('url', '')}",
+             f"updated: {now()}", f"run: {run_id}", f"risk: {'high' if sensitive else 'normal'}"]
+    if sensitive:
+        front.append(f"sensitive: {', '.join(sensitive)}")
+    text = "\n".join(front + ["---", "",
+        "## Summary", (h.get("summary") or "").strip(), "",
+        "## Decisions", bullets(h.get("decisions")), "",
+        "## Follow-ups", bullets(h.get("followUps")), "",
+        "## Open review findings", bullets(h.get("openFindings")), "",
+        "## Pre-existing issues", bullets(pre), "",
+        "## Testing", (h.get("testing") or "Not stated.").strip(), "",
+        "## Risk", (h.get("risk") or "Not stated.").strip(), "",
+        "## How to revert", (h.get("revert") or "Not stated.").strip(), "",
+        "## Commit message", (h.get("commitMessage") or "").strip(), "",
+        "## PR title", (h.get("prTitle") or "").strip(), "",
+        "## PR changes", bullets(h.get("prChanges")), "",
+    ])
+    d = state_dir / "handoffs"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{t['id']}.md"
+    path.write_text(text)
+    return path
+
+
 def now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -450,31 +483,7 @@ class Loop:
         return h or {}
 
     def write_handoff(self, t: dict, res: dict, h: dict | None, sensitive: list[str] | None = None) -> None:
-        h = h or {"summary": f"Handoff agent failed. {res['why']}".strip(), "decisions": [], "followUps": [], "openFindings": [],
-                  "commitMessage": "", "prTitle": t["name"], "prChanges": [], "testing": "", "risk": "", "revert": ""}
-        bullets = lambda xs: "\n".join(f"- {x}" for x in xs) or "- None"  # noqa: E731
-        pre = [finding_text(f).splitlines()[0] + (f" [{f['class']}]" if f.get("class") else "") for f in res.get("preExisting") or []]
-        front = ["---", f"id: {t['id']}", f"title: {t['name']}", f"status: {res['status']}", f"branch: {t['branch']}",
-                 f"base: {re.sub(r'^origin/', '', t['base'])}", f"worktree: {t['worktree']}", f"card: {t.get('url', '')}",
-                 f"updated: {now()}", f"run: {self.run.id}", f"risk: {'high' if sensitive else 'normal'}"]
-        if sensitive:
-            front.append(f"sensitive: {', '.join(sensitive)}")
-        text = "\n".join(front + ["---", "",
-            "## Summary", h["summary"].strip(), "",
-            "## Decisions", bullets(h["decisions"]), "",
-            "## Follow-ups", bullets(h["followUps"]), "",
-            "## Open review findings", bullets(h["openFindings"]), "",
-            "## Pre-existing issues", bullets(pre), "",
-            "## Testing", (h.get("testing") or "Not stated.").strip(), "",
-            "## Risk", (h.get("risk") or "Not stated.").strip(), "",
-            "## How to revert", (h.get("revert") or "Not stated.").strip(), "",
-            "## Commit message", h["commitMessage"].strip(), "",
-            "## PR title", h["prTitle"].strip(), "",
-            "## PR changes", bullets(h["prChanges"]), "",
-        ])
-        d = Path(self.p["dir"]) / "handoffs"
-        d.mkdir(parents=True, exist_ok=True)
-        (d / f"{t['id']}.md").write_text(text)
+        write_handoff_file(Path(self.p["dir"]), self.run.id, t, res, h, sensitive)
 
     def chain(self, t: dict, plan: dict) -> dict:
         try:

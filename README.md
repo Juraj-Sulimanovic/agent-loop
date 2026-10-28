@@ -46,14 +46,15 @@ The changes stay staged in the worktree until you approve them.
 ```
 /plugin marketplace add Juraj-Sulimanovic/agent-loop
 /plugin install agent-loop@agent-loop
-/plugin install agent-loop-panel@agent-loop      # optional: the live progress pane
+/plugin install agent-loop-panel@agent-loop      # optional, see below
 ```
 
-The panel shows the newest run of the project in a band above the prompt: the phases, and one
-line for each ticket with its running agent calls. The band shows while a run continues, and for
-30 minutes after it is complete. For the full view with the log, use `/agent-loop-panel`. Claude
-Code puts that pane beside the chat in the full-screen layout, and above the prompt in the other
-layout.
+In Claude Code, the `sprint` and `ticket` skills run the loop as a Claude Code Workflow. Claude
+Code shows its own progress view (`/workflows`): the phases, each agent with its model, tokens
+and time, the arrow keys to look inside, and the keys to stop or pause.
+
+The optional `agent-loop-panel` shows runs that the Python runner does (`agentloop.py run`, for
+example from a terminal) in a band above the prompt. `/agent-loop-panel` opens its full pane.
 
 ### Codex
 
@@ -240,8 +241,13 @@ To decrease the cost, decrease `review.lenses`, set `review.verify` to `false`, 
 
 ## Runs
 
-`agentloop.py run` prepares the worktrees, refreshes the brief and runs the loop. With
-`--detach`, it runs in the background.
+There are two engines for the same loop. They use the same prompts, review and handoff notes:
+
+- **Claude Code:** a Workflow (`workflows/sprint.js`). `agentloop.py wf start` prepares the
+  tickets and gives the workflow its arguments. Steps that need files or git go to
+  `agentloop.py wf checks` and `wf handoff`.
+- **Codex, Cursor, a terminal:** `agentloop.py run`. It runs each stage with the tool that the
+  configuration names. With `--detach`, it runs in the background.
 
 Each run has a folder in `runs/<run id>/` in the state folder. It contains `run.json` (the stage
 of each ticket and the summary), `log.txt`, the prompt and result of each agent call, and the

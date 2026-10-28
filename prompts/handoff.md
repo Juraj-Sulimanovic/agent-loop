@@ -1,4 +1,4 @@
-Ticket {{ref}} "{{name}}" ({{url}}) has been implemented in the worktree `{{worktree}}` (your working directory; branch `{{branch}}`, base `{{base}}`). Status: {{status}}. Do not edit any file.
+Ticket {{ref}} "{{name}}" ({{url}}) has been implemented in the worktree `{{worktree}}` (your working directory; branch `{{branch}}`, base `{{base}}`). Status: {{status}}. Do not edit any file in the worktree.{{cwdNote}}
 
 Read `AGENTS.md` (or `CLAUDE.md`) for the commit message and pull request conventions. The staged change against `{{base}}`:
 
@@ -30,3 +30,5 @@ Return the handoff the next agents on this project will read:
 - `testing`: how the change was verified (the checks, the tests added, anything run by hand) and what it showed.
 - `risk`: what could go wrong once it ships, and who or what would notice.
 - `revert`: how to undo it (a plain revert, or the extra step a migration, data change or config needs).
+
+{{saveNote}}
