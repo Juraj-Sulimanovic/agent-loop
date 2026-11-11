@@ -38,7 +38,7 @@
     "file": "REVIEW.md"
   },
   "sensitivePaths": [],
-  "commitAtHandoff": false,
+  "commitAtHandoff": true,
   "tracker": {
     "type": "trello",
     "columns": {
@@ -59,6 +59,8 @@
   "pr": {
     "template": ".github/PULL_REQUEST_TEMPLATE.md",
     "ticketLine": "#### Ticket [{ref}]({url})",
-    "draft": false
+    "draft": false,
+    "stack": "chains",
+    "ghStack": true
   }
 }

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import urllib.parse
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -299,6 +300,22 @@ class GitHubCloneLayoutTest(Base):
         out = self.run_cli("doctor")
         self.assertNotIn("FAIL", out)
         self.assertIn("github board readable (4 columns", out)
+
+    def test_doctor_wants_gh_stack_for_one_stack_per_sprint(self):
+        cfg_path = al.require_project().dir / "config.json"
+        cfg = json.loads(cfg_path.read_text())
+        cfg["pr"]["stack"] = "sprint"
+        cfg_path.write_text(json.dumps(cfg))
+        import stacking
+        with mock.patch.object(stacking, "gh_stack_installed", lambda: False), self.assertRaises(SystemExit):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                al.main(["doctor"])
+        self.assertIn("FAIL gh stack installed", out.getvalue())
+        self.assertIn("gh extension install github/gh-stack", out.getvalue())
+        cfg["pr"]["ghStack"] = False  # the user said no: chained PRs, nothing to check
+        cfg_path.write_text(json.dumps(cfg))
+        self.assertNotIn("FAIL", self.run_cli("doctor"))
 
 
 def adf(*paras):

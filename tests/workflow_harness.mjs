@@ -22,6 +22,9 @@ function fake(prompt, opts) {
   if (kind.startsWith('stack')) {
     const onto = /--onto (\d+)/.exec(prompt)[1]
     if (scenario === 'nostack') return { ok: false, reason: 'the work is on separate branches', base: '', tree: '' }
+    if (scenario === 'resolve' && kind === 'stack') {
+      return { ok: false, reason: '', base: '', tree: '', resolve: { id: onto, ref: '#' + onto, why: 'conflicts with #9', prompt: `resolve #${onto} please` } }
+    }
     return { ok: true, reason: '', base: `feat/${onto}`, tree: `tree-stacked-${id}` }
   }
   if (kind.startsWith('plan')) {
@@ -29,7 +32,7 @@ function fake(prompt, opts) {
     const files = { 1: ['a.py'], 2: ['a.py'], 3: ['text.py'], 5: ['c.py'], 7: ['a.py'], 8: ['c.py'], 9: ['z.py'] }[id] || ['x.py']
     return { feasible: true, question: null, summary: 's', files, steps: [], risks: [], planMarkdown: `# Plan ${id}`, knowledge: [] }
   }
-  if (kind === 'build' || kind.startsWith('fix')) {
+  if (kind === 'build' || kind.startsWith('fix') || kind.startsWith('resolve')) {
     return { summary: 'ok', checks: [], stuck: null, responses: [{ n: 1, action: 'fixed', note: 'guarded' }] }
   }
   if (kind.startsWith('checks')) {

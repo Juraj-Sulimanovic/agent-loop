@@ -94,10 +94,18 @@ Ask these questions in one step:
   `.env`" and "install dependencies".
 - **Parallel tickets:** 3, 5 or 10. Each ticket uses four to six agent calls.
 - **Pull requests:** ready for review, or draft.
-- **Stacking:** commit each ready ticket locally at handoff (`commitAtHandoff`), so tickets that
-  overlap or wait for another ticket of the run stack on it in the same run. Nothing is pushed.
-  If `facts.agentsForbidCommits` is true, tell the user that this is a Python step, not an agent,
-  and ask them to confirm.
+- **Handoff commits so waiters can continue** (`commitAtHandoff`): commit each ready ticket
+  locally at handoff ("yes" is the default and recommended), so tickets that overlap or wait for
+  another ticket of the run can continue on that commit in the same run. Nothing is pushed. This
+  is separate from how ship opens pull requests below. If `facts.agentsForbidCommits` is true,
+  tell the user that this is a Python step, not an agent, and ask them to confirm.
+- **How ship opens PRs** (`pr.stack`): the shape of the pull request stacks the ship skill builds
+  after the sprint (not the handoff commits above).
+  - `sprint`: one stack for the whole sprint. Independent tickets go on top of the ones that
+    build on each other, and the stack goes on top of the user's own open stack when a ticket
+    builds on it.
+  - `chains` (default): only tickets that build on another ticket are stacked; the rest target
+    the trunk.
 - **Agent tools:** the tool for each stage. Offer the installed tools (`claude`, `codex`,
   `cursor-agent`). The default is the tool of this session. Suggest a different tool for
   `review` than for `implement`, for an independent review. This sets `agents.default` and the
@@ -105,6 +113,14 @@ Ask these questions in one step:
 
 If the Codex configuration of the team uses a custom provider that a headless run cannot reach,
 set `agentArgs.codex` to `["--ignore-user-config"]`.
+
+If the user picks `sprint` and `facts.ghStack` is false, the GitHub CLI extension `gh stack` is
+missing. It links each sprint's pull requests into a stack on GitHub. Ask the user whether to
+install it:
+
+- **Yes:** run `gh extension install github/gh-stack`, then `gh stack --version` to confirm.
+- **No:** set `pr.ghStack` to `false`. The ship skill then chains the pull requests, each on the
+  branch below, without a stack on GitHub.
 
 Then ask about review depth:
 

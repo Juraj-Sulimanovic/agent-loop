@@ -347,8 +347,13 @@ if (!COMMITS) {
   for (const d of deferred) results.set(d.id, { status: 'deferred' })
 
   const STACK = {
-    type: 'object', additionalProperties: false, required: ['ok', 'reason', 'base', 'tree'],
-    properties: { ok: { type: 'boolean' }, reason: { type: 'string' }, base: { type: 'string' }, tree: { type: 'string' } },
+    type: 'object', additionalProperties: false, required: ['ok', 'reason', 'base', 'tree', 'resolve'],
+    properties: {
+      ok: { type: 'boolean' }, reason: { type: 'string' }, base: { type: 'string' }, tree: { type: 'string' },
+      // a finished ticket that `wf stack` is putting under another needs an agent first
+      resolve: { type: ['object', 'null'], additionalProperties: false, required: ['id', 'ref', 'why', 'prompt'],
+        properties: { id: { type: 'string' }, ref: { type: 'string' }, why: { type: 'string' }, prompt: { type: 'string' } } },
+    },
   }
 
   function start(t, plan) {
@@ -369,9 +374,17 @@ if (!COMMITS) {
     const n = (stacks.get(w.t.id) || 0) + 1
     stacks.set(w.t.id, n)
     const cmd = `cd ${P.root} && ${A.al} wf stack ${A.run} --id ${w.t.id} --onto ${onto}${needs.length ? ' --needs ' + needs.join(',') : ''}`
-    const moved = await agent(
-      `Run exactly this command and return its JSON output as your result, unchanged:\n\n\`\`\`bash\n${cmd}\n\`\`\`\n\nDo nothing else.`,
-      { label: `stack${n > 1 ? n : ''}:${ref(w.t)}`, phase: 'Plan', schema: STACK, effort: 'low' })
+    // Blockers on separate branches go in a line first; a conflict or a failing check there gets a
+    // resolve agent, then `wf stack` carries on from where it stopped.
+    let moved
+    for (let k = 0; k < 6; k++) {
+      moved = await agent(
+        `Run exactly this command and return its JSON output as your result, unchanged:\n\n\`\`\`bash\n${cmd}\n\`\`\`\n\nDo nothing else.`,
+        { label: `stack${n > 1 ? n : ''}${k ? '.' + (k + 1) : ''}:${ref(w.t)}`, phase: 'Plan', schema: STACK, effort: 'low' })
+      if (!moved || !moved.resolve) break
+      log(`${moved.resolve.ref}: ${moved.resolve.why}; a resolve agent combines them for ${ref(w.t)}`)
+      await agent(moved.resolve.prompt, { label: `resolve${k + 1}:${moved.resolve.ref}`, phase: 'Build', schema: S.build })
+    }
     if (!moved || !moved.ok) {
       needsHuman.push({ id: w.t.id, ref: ref(w.t), name: w.t.name,
         question: `cannot build on ${'#' + onto}: ${moved ? moved.reason : 'the stack step failed'}` })

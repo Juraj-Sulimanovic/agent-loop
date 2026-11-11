@@ -138,13 +138,70 @@ class StackingTest(unittest.TestCase):
         out = json.loads(self.cli("wf", "stack", self.run_id, "--id", "2", "--onto", "1"))
         self.assertEqual((out["ok"], out["reason"]), (False, "#2 has changes in its worktree"))
 
-    def test_stack_refuses_work_on_separate_branches(self):
+    def stack(self, tid, onto, needs=""):
+        return json.loads(self.cli("wf", "stack", self.run_id, "--id", tid, "--onto", onto, *(["--needs", needs] if needs else [])))
+
+    def test_stack_puts_blockers_on_separate_branches_in_a_line(self):
+        self.start()
+        self.finish_ready("1")
+        three = self.finish_ready("3", change="z = 3\n")["commit"]
+        out = self.stack("2", "1", "3")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual((out["base"], out["resolve"]), ("feat/1-one", None))
+        one = git("-C", str(self.clone), "rev-parse", "feat/1-one")
+        self.assertEqual(git("-C", str(self.clone), "rev-parse", "feat/1-one^"), three)  # #1 moved onto #3
+        self.assertEqual(git("-C", str(self.worktree("2")), "rev-parse", "HEAD"), one)
+        note = (self.state / "handoffs" / "1.md").read_text()
+        self.assertIn("base: feat/3-three", note)
+        self.assertIn(f"commit: {one}", note)
+        self.assertNotIn("resolved:", note)  # a clean rebase: nothing for ship to review
+        state = json.loads((self.run_dir / "run.json").read_text())
+        self.assertEqual(state["tickets"]["1"]["commit"], one)
+        self.assertEqual({t["id"]: t["base"] for t in state["prepared"]}["1"], "feat/3-three")
+
+    def test_stack_gives_a_conflict_to_the_resolve_agent_and_carries_on(self):
+        self.start()
+        (self.worktree("1") / "a.py").write_text("x = 1\n")
+        self.finish_ready("1")
+        (self.worktree("3") / "a.py").write_text("x = 3\n")
+        self.finish_ready("3", change="z = 3\n")
+        out = self.stack("2", "1", "3")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["resolve"]["id"], "1")
+        self.assertIn("conflicts in: `a.py`", out["resolve"]["prompt"])
+        self.assertIn(str(self.worktree("1")), out["resolve"]["prompt"])
+        # the agent resolves and stages; the second call continues the rebase and stacks #2
+        (self.worktree("1") / "a.py").write_text("x = 1\ny = 3\n")
+        git("-C", str(self.worktree("1")), "add", "a.py")
+        out = self.stack("2", "1", "3")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual((self.worktree("2") / "a.py").read_text(), "x = 1\ny = 3\n")
+        self.assertIn("resolved: moved onto #3 during the sprint", (self.state / "handoffs" / "1.md").read_text())
+
+    def test_stack_gives_up_after_two_unresolved_conflicts(self):
+        self.start()
+        (self.worktree("1") / "a.py").write_text("x = 1\n")
+        self.finish_ready("1")
+        (self.worktree("3") / "a.py").write_text("x = 3\n")
+        self.finish_ready("3", change="z = 3\n")
+        self.assertIsNotNone(self.stack("2", "1", "3")["resolve"])
+        self.assertIsNotNone(self.stack("2", "1", "3")["resolve"])
+        out = self.stack("2", "1", "3")
+        self.assertEqual(out["resolve"], None)
+        self.assertIn("conflicts with #3 in a.py; the rebase is left in progress", out["reason"])
+
+    def test_stack_never_moves_a_branch_another_ticket_builds_on(self):
         self.start()
         self.finish_ready("1")
         self.finish_ready("3", change="z = 3\n")
-        out = json.loads(self.cli("wf", "stack", self.run_id, "--id", "2", "--onto", "1", "--needs", "3"))
+        state = json.loads((self.run_dir / "run.json").read_text())
+        for t in state["prepared"]:
+            if t["id"] == "3":
+                t["base"] = "feat/1-one"
+        (self.run_dir / "run.json").write_text(json.dumps(state))
+        out = self.stack("2", "1", "3")
         self.assertFalse(out["ok"])
-        self.assertIn("does not contain feat/3-three: the work is on separate branches", out["reason"])
+        self.assertIn("#1 cannot move onto #3: #3 build on it", out["reason"])
         self.assertEqual(git("-C", str(self.worktree("2")), "rev-parse", "HEAD"), git("-C", str(self.clone), "rev-parse", "origin/main"))
 
     def test_finish_trusts_run_json_over_the_workflow_summary(self):
@@ -188,7 +245,16 @@ class WithoutCommitsTest(StackingTest):
     def test_stack_guards(self):
         pass
 
-    def test_stack_refuses_work_on_separate_branches(self):
+    def test_stack_puts_blockers_on_separate_branches_in_a_line(self):
+        pass
+
+    def test_stack_gives_a_conflict_to_the_resolve_agent_and_carries_on(self):
+        pass
+
+    def test_stack_gives_up_after_two_unresolved_conflicts(self):
+        pass
+
+    def test_stack_never_moves_a_branch_another_ticket_builds_on(self):
         pass
 
     def test_finish_trusts_run_json_over_the_workflow_summary(self):

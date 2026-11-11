@@ -116,6 +116,16 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(r["needsHuman"][0]["question"], "cannot build on #1: the work is on separate branches")
         self.assertNotIn("build:#2", out["calls"])
 
+    def test_a_resolve_request_from_stack_runs_the_agent_then_stacks_again(self):
+        out = self.run_workflow(args(["1", "2"], commitAtHandoff=True), scenario="resolve")
+        calls = out["calls"]
+        self.assertLess(calls.index("stack:#2"), calls.index("resolve1:#1"))
+        self.assertLess(calls.index("resolve1:#1"), calls.index("stack.2:#2"))
+        self.assertEqual(out["prompts"]["resolve1:#1"], "resolve #1 please")
+        self.assertIn("build:#2", calls)
+        self.assertEqual(sorted(x["ref"] for x in out["result"]["ready"]), ["#1", "#2"])
+        self.assertTrue(any("#1: conflicts with #9; a resolve agent combines them for #2" in l for l in out["logs"]), out["logs"])
+
     def test_tracker_blocked_ticket_waits_and_stacks(self):
         a = args(["3", "9"], commitAtHandoff=True)
         a["tickets"][1]["waitFor"] = ["3"]

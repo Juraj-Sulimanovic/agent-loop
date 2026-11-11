@@ -43,6 +43,7 @@ Commands:
     annotate ID [--summary S] [--use U] [--title T] [--kind K] [--date D] [--status new|distilled]
     handoffs [--status S]           handoff notes as JSON
     mark ID STATUS [--pr URL]       set a handoff's status (ready, needs-human, shipped)
+    stack plan|build [IDS] [--squash]  internal, for the ship skill: the PR stacks of the ready tickets
     move ID COLUMN_KEY              move a ticket to a configured column (ready, doing, review) or a named one
 """
 
@@ -92,7 +93,7 @@ DEFAULT_CONFIG = {
     "agentTimeoutMinutes": 30,
     "review": {"lenses": ["spec", "correctness", "standards"], "verify": True, "votes": 3, "file": "REVIEW.md"},
     "sensitivePaths": [],
-    "commitAtHandoff": False,
+    "commitAtHandoff": True,
     "tracker": {
         "type": "trello",
         "columns": {"ready": "Sprint Backlog", "doing": "In Progress", "review": "Code Review"},
@@ -104,6 +105,8 @@ DEFAULT_CONFIG = {
         "template": ".github/PULL_REQUEST_TEMPLATE.md",
         "ticketLine": "#### Ticket [{ref}]({url})",
         "draft": False,
+        "stack": "chains",
+        "ghStack": True,
     },
 }
 
@@ -907,6 +910,7 @@ def detect(start: Path, tracker_url: str | None) -> dict:
             "reviewFile": (main / "REVIEW.md").is_file(),
             "agentsForbidCommits": bool(re.search(r"(?i)git commit.{0,120}(confirm|only after)", agents_md)),
             "host": session_host(),
+            "ghStack": __import__("stacking").gh_stack_installed(),
             "credentials": {
                 "trello": bool(os.environ.get("TRELLO_KEY") and os.environ.get("TRELLO_TOKEN")),
                 "jira": bool(os.environ.get("JIRA_EMAIL") and os.environ.get("JIRA_API_TOKEN")),
@@ -1035,6 +1039,12 @@ def cmd_doctor(a) -> None:
             target = shlex.split(cmd)[1] if len(shlex.split(cmd)) > 1 else ""
             ok = not target or target in make_targets(p.main / "Makefile")
         check(ok, f"command `{cmd}`", "install it or change checks/setup")
+    stack = cfg["pr"].get("stack") or "chains"
+    check(stack in ("chains", "sprint"), f"pr.stack is {stack}", "set pr.stack to \"chains\" or \"sprint\"")
+    if stack == "sprint" and cfg["pr"].get("ghStack", True):
+        import stacking
+        check(stacking.gh_stack_installed(), "gh stack installed (links each sprint's PRs into a GitHub stack)",
+              "gh extension install github/gh-stack, or set pr.ghStack to false for chained PRs without a GitHub stack")
     tpl = cfg["pr"].get("template")
     check(not tpl or (p.main / tpl).is_file(), f"PR template {tpl or '(none)'}", "fix pr.template or set it to \"\"")
     if not all(results):
@@ -1257,35 +1267,175 @@ def commit_ticket(wt: Path, message: str, base: str = "") -> tuple[str, str]:
     return git(wt, "rev-parse", "HEAD").strip(), ""
 
 
+def reline(p: Project, run, x: dict, below: dict) -> dict | None:
+    """Put finished ticket `x` on top of finished ticket `below`, in `x`'s own worktree, so that a
+    ticket that needs both can build on one branch. None when it is there; else what stops it:
+    {"resolve": {...}} for an agent (call again after it), or {"reason": ...}.
+
+    A conflict, or a check that fails on top of `below`, gets one resolve agent; the handoff then
+    says `resolved:`, and the ship skill reviews that change before it publishes it."""
+    import runner
+    import stacking
+    wt, ref = x["worktree"], tracker_for(p).ref
+    st = ((run.state().get("tickets") or {}).get(x["id"]) or {}).get("reline") or {}
+    handoff = p.dir / "handoffs" / f"{x['id']}.md"
+    note = {**(read_handoff(handoff) if handoff.is_file() else {}), "id": x["id"], "title": x["name"],
+            "worktree": wt, "branch": x["branch"], "path": str(handoff)}
+    save = lambda: run.update(ticket=(x["id"], {"reline": st}))  # noqa: E731
+
+    def agent_for(why: str, problem: str) -> dict:
+        save()
+        return {"resolve": {"id": x["id"], "ref": x["ref"], "why": why, "prompt": stacking.resolve_prompt(
+            p.dir, p.config, str(p.dir / "brief.md"), ref, note, below["branch"], below["id"], problem)}}
+
+    below_commit = stacking.rev(wt, below["branch"])
+    if stacking.rebasing(wt):
+        files = stacking.unmerged(wt) or stacking.has_markers(wt, st.get("files") or [])
+        if files:
+            if st.get("tries", 0) >= 2:
+                return {"reason": f"{x['ref']} conflicts with {below['ref']} in {', '.join(files)}; the rebase is left in progress in {wt}"}
+            st["tries"] = st.get("tries", 0) + 1
+            return agent_for(f"conflicts with {below['ref']}", stacking.conflict_problem(files))
+        stacking.git(wt, "rebase", "--continue", env=stacking.NO_EDITOR)
+        st["resolved"] = True
+        if stacking.rebasing(wt):
+            st.update(files=stacking.unmerged(wt), tries=st.get("tries", 0) + 1)
+            return agent_for(f"conflicts with {below['ref']}", stacking.conflict_problem(st["files"]))
+        st["phase"] = "checks"
+    elif st.get("phase") != "checks" and not stacking.is_ancestor(wt, below_commit, "HEAD"):
+        fork = stacking.out(wt, "merge-base", "HEAD", x["base"])
+        if not fork:
+            return {"reason": f"cannot tell where {x['ref']}'s own commits start"}
+        stacking.git(wt, "rebase", "--onto", below_commit, fork, env=stacking.NO_EDITOR)
+        st.update(phase="checks", tries=0)
+        if stacking.rebasing(wt):
+            st.update(phase="rebase", files=stacking.unmerged(wt), tries=1)
+            return agent_for(f"conflicts with {below['ref']}", stacking.conflict_problem(st["files"]))
+    if st.get("phase") == "rebase":  # the rebase was finished outside reline (by hand, after it gave up)
+        st.update(phase="checks", resolved=True)
+    if st.get("phase") == "checks":
+        if stacking.git(wt, "diff", "--cached", "--quiet").returncode:
+            stacking.git(wt, "commit", "-q", "--amend", "--no-edit")
+            st["resolved"] = True
+        failing = [c for c in runner.run_checks(wt, p.config["checks"]) if not c["ok"]]
+        if failing:
+            if st.get("checkTries", 0) >= 1:
+                return {"reason": f"{x['ref']} fails {', '.join(c['cmd'] for c in failing)} on top of {below['ref']}"}
+            st["checkTries"] = 1
+            return agent_for(f"fails its checks on top of {below['ref']}", stacking.checks_problem(failing))
+        st["phase"] = "done"
+    commit = stacking.out(wt, "rev-parse", "HEAD")
+    x["base"] = below["branch"]
+    run.tickets = [x if t["id"] == x["id"] else t for t in run.tickets]
+    run.update(prepared=run.tickets, ticket=(x["id"], {"commit": commit, "reline": st}))
+    if handoff.is_file():
+        stacking.set_meta(handoff, "base", below["branch"])
+        stacking.set_meta(handoff, "commit", commit)
+        if st.get("resolved"):
+            stacking.set_meta(handoff, "resolved", f"moved onto {below['ref']} during the sprint, and an agent combined the two")
+    return None
+
+
 def stack_ticket(p: Project, run, tid: str, onto: str, needs: list[str]) -> dict:
     """Move a waiting ticket's worktree onto a finished ticket's commit, so it builds on that work.
 
     The waiting ticket has only been planned: its worktree must hold no tracked change and no
-    commit past its base. The new base must contain the ticket's current base and every other
-    ticket it needs, or work would be lost: then it answers ok false with the reason."""
+    commit past its base. When it needs finished tickets that are on separate branches, they are
+    put in a line first, each on the one before (`reline`), and it goes on the top one. A branch
+    that another ticket of the run builds on is never moved. A conflict or a failing check answers
+    `resolve`: the workflow runs that agent, then calls this again, which carries on."""
+    def fail(reason: str) -> dict:
+        return {"ok": False, "reason": reason, "base": "", "tree": "", "resolve": None}
+
     by = {t["id"]: t for t in run.tickets}
     state = run.state().get("tickets") or {}
     t, blocker = by.get(tid), by.get(onto)
     if not t or not blocker:
-        return {"ok": False, "reason": f"#{tid} or #{onto} is not in this run", "base": "", "tree": ""}
+        return fail(f"#{tid} or #{onto} is not in this run")
     for need in [onto, *needs]:
         if (state.get(need) or {}).get("status") != "ready" or not (state.get(need) or {}).get("commit"):
-            return {"ok": False, "reason": f"{(by.get(need) or {}).get('ref', '#' + need)} is not committed and ready", "base": "", "tree": ""}
+            return fail(f"{(by.get(need) or {}).get('ref', '#' + need)} is not committed and ready")
     wt = Path(t["worktree"])
     if git(wt, "status", "--porcelain", "--untracked-files=no", check=False).strip():
-        return {"ok": False, "reason": f"{t['ref']} has changes in its worktree", "base": "", "tree": ""}
+        return fail(f"{t['ref']} has changes in its worktree")
     if git(wt, "rev-list", "--count", f"{t['base']}..HEAD", check=False).strip() not in ("", "0"):
-        return {"ok": False, "reason": f"{t['ref']} has commits of its own", "base": "", "tree": ""}
-    target = blocker["branch"]
-    for must in [t["base"], *(by[n]["branch"] for n in needs if n in by)]:
-        if subprocess.run(["git", "-C", str(wt), "merge-base", "--is-ancestor", must, target]).returncode:
-            return {"ok": False, "reason": f"{blocker['ref']}'s branch does not contain {must}: the work is on separate branches",
-                    "base": "", "tree": ""}
+        return fail(f"{t['ref']} has commits of its own")
+
+    import stacking
+    contains = lambda a, b: stacking.is_ancestor(wt, b, a)  # noqa: E731
+    members = list(dict.fromkeys(n for n in [*needs, onto] if n in by))
+    tips = [m for m in members if not any(o != m and contains(by[o]["branch"], by[m]["branch"]) for o in members)]
+    for below, x in zip(tips, tips[1:]):
+        users = [u["ref"] for u in run.tickets if u["id"] not in (tid, x) and u.get("base") == by[x]["branch"]]
+        if users:
+            return fail(f"{by[x]['ref']} cannot move onto {by[below]['ref']}: {', '.join(users)} build on it")
+        stop = reline(p, run, by[x], by[below])
+        if stop:
+            return {**fail(stop.get("reason", "")), "resolve": stop.get("resolve")}
+        by = {u["id"]: u for u in run.tickets}
+    top = by[tips[-1]]
+    for must in [t["base"], *(by[n]["branch"] for n in members)]:
+        if not contains(top["branch"], must):
+            return fail(f"{top['ref']}'s branch does not contain {must}: the work is on separate branches")
+    target = top["branch"]
     git(wt, "reset", "-q", "--hard", target)
     t["base"] = target
     run.tickets = [t if x["id"] == tid else x for x in run.tickets]
-    run.update(prepared=run.tickets, ticket=(tid, {"stage": f"stacked on {blocker['ref']}"}))
-    return {"ok": True, "reason": "", "base": target, "tree": git(wt, "write-tree", check=False).strip()}
+    run.update(prepared=run.tickets, ticket=(tid, {"stage": f"stacked on {top['ref']}"}))
+    return {"ok": True, "reason": "", "base": target, "tree": git(wt, "write-tree", check=False).strip(), "resolve": None}
+
+
+def cmd_stack(a) -> None:
+    """Internal, for the ship skill: the PR stacks of the ready tickets.
+
+    plan    which tickets go into which stack, in what order, on which base (changes nothing);
+            `squash` lists the rebased tickets with more than one commit
+    build   commit each staged ticket locally, rebase it onto the one below (with --squash,
+            squash a ticket with more commits into one first), resolve a conflict with one agent,
+            run the checks and one combine review, and print the push, PR and `gh stack link`
+            commands
+    """
+    import stacking
+    p = require_project(a.config)
+    cfg = p.config
+    t = tracker_for(p)
+    wanted = {t.norm_id(x) for x in a.ids}
+    ready = [h for h in handoffs(p) if h.get("status") == "ready" and (not wanted or h["id"] in wanted)]
+    if not ready:
+        raise SystemExit("No ready tickets to ship.")
+    prs, me, warnings = [], "", []
+    if cfg["repo"]:
+        try:
+            prs = gh_json("pr", "list", "-R", cfg["repo"], "--state", "open", "--limit", "100",
+                          "--json", "number,headRefName,baseRefName,author,url")
+            me = gh("api", "user", "--jq", ".login").strip()
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            warnings.append(f"GitHub unavailable, so no open stack is joined: {e}")
+    mode = cfg["pr"].get("stack") or "chains"
+    link = mode == "sprint" and bool(cfg["pr"].get("ghStack", True))
+    if link and not stacking.gh_stack_installed():
+        warnings.append("`gh stack` is not installed: the PRs are chained, but GitHub gets no stack "
+                        "(gh extension install github/gh-stack)")
+        link = False
+    stacks = stacking.plan(ready, stacking.trunk_of(cfg["base"]), mode, prs, me, link)
+    squash = []
+    for s in stacks:
+        for x in s["tickets"]:
+            own = stacking.own_commits(x["worktree"], x) if x["rebase"] and Path(x["worktree"]).is_dir() else []
+            if own and len(own) > 1:
+                squash.append({"ref": t.ref(x["id"]), "id": x["id"], "worktree": x["worktree"], "commits": len(own)})
+    if a.action == "build":
+        git(p.root, "fetch", "-q", "origin")
+        import adapters
+        builder = stacking.Builder(run_project(p), cfg, p.dir, stacking.run_dir_for(p.dir), adapters.run_agent, ref=t.ref,
+                                   squash=a.squash)
+        stacks = builder.build(stacks)
+        stacking.commands(stacks, cfg["repo"], str(p.root), p.dir, prs, bool(cfg["pr"].get("draft")))
+    keep = ("id", "title", "branch", "base", "parent", "worktree", "risk", "sensitive", "path", "rebase", "status", "reason",
+            "rebased", "resolved", "checks", "findings", "conflicts", "commit", "stat")
+    print(json.dumps({"mode": mode, "link": link, "warnings": warnings, "squash": squash, "stacks": [
+        {**{k: v for k, v in s.items() if k != "tickets"},
+         "tickets": [{"ref": t.ref(x["id"]), **{k: x[k] for k in keep if k in x}} for x in s["tickets"]]} for s in stacks]}, indent=2))
 
 
 def cmd_wf(a) -> None:
@@ -1576,6 +1726,10 @@ def main(argv: list[str] | None = None) -> None:
     x.add_argument("--onto", help="stack: the finished ticket to build on"); x.add_argument("--needs", help="stack: other finished tickets the new base must contain")
     x.add_argument("--wf", help="attach: the Workflow run id"); x.add_argument("--transcripts", help="attach: the Workflow transcript folder")
     x.set_defaults(fn=cmd_wf)
+    x = sub.add_parser("stack", help="internal, for the ship skill: build the PR stacks of the ready tickets")
+    x.add_argument("action", choices=["plan", "build"]); x.add_argument("ids", nargs="*")
+    x.add_argument("--squash", action="store_true", help="the user confirmed: squash a ticket with more than one commit into one")
+    x.set_defaults(fn=cmd_stack)
     x = sub.add_parser("status"); x.add_argument("run", nargs="?"); x.add_argument("--json", action="store_true"); x.set_defaults(fn=cmd_status)
     x = sub.add_parser("handoffs"); x.add_argument("--status"); x.set_defaults(fn=cmd_handoffs)
     x = sub.add_parser("mark"); x.add_argument("id"); x.add_argument("status", choices=["ready", "needs-human", "shipped"]); x.add_argument("--pr"); x.set_defaults(fn=cmd_mark)
