@@ -12,8 +12,9 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_stacking import StackingTest, git  # noqa: E402
+from test_stacking import Repo, git  # noqa: E402  (Repo has no tests: importing it does not run test_stacking twice)
 
+import agentloop as al  # noqa: E402
 import stacking  # noqa: E402
 
 
@@ -36,12 +37,12 @@ class Agent:
 
 
 class ShipStackTest(unittest.TestCase):
-    setUp_ = StackingTest.setUp
-    tearDown = StackingTest.tearDown
-    cli = StackingTest.cli
-    start = StackingTest.start
-    worktree = StackingTest.worktree
-    finish_ready = StackingTest.finish_ready
+    setUp_ = Repo.setUp
+    tearDown = Repo.tearDown
+    cli = Repo.cli
+    start = Repo.start
+    worktree = Repo.worktree
+    finish_ready = Repo.finish_ready
 
     def setUp(self):
         self.setUp_()
@@ -122,7 +123,7 @@ class ShipStackTest(unittest.TestCase):
 
     def test_staged_tickets_are_committed_with_their_message(self):
         self.tearDown()
-        StackingTest.setUp(self, commits=False)
+        Repo.setUp(self, commits=False)
         self.configure(stack="sprint")
         self.start()
         self.finish_ready("1")
@@ -133,7 +134,7 @@ class ShipStackTest(unittest.TestCase):
 
     def test_a_ticket_with_nothing_to_ship_stops_its_stack(self):
         self.tearDown()
-        StackingTest.setUp(self, commits=False)
+        Repo.setUp(self, commits=False)
         self.configure(stack="sprint")
         self.start("1", "3")
         self.finish_ready("1")
@@ -255,6 +256,139 @@ class ShipStackTest(unittest.TestCase):
         self.assertFalse(any("feat/3-three" in c for c in s["commands"]))
 
 
+    # A handoff's `base:` is what the loop wrote; the branch may sit somewhere else by now.
+
+    def rebased_by_hand(self):
+        """#3 was finished on the trunk, then the developer rebased it onto #1's branch."""
+        self.start("1", "3")
+        self.finish_ready("1")
+        self.finish_ready("3", change="three = 3\n")
+        git("-C", str(self.worktree("3")), "rebase", "-q", "feat/1-one")
+        self.assertIn("base: main", (self.state / "handoffs" / "3.md").read_text())
+
+    def test_a_ticket_rebased_onto_another_ticket_ships_on_it(self):
+        self.configure(stack="chains")
+        self.rebased_by_hand()
+        note = self.state / "handoffs" / "3.md"
+        out = self.stack("plan")
+        self.assertEqual(out["warnings"], ["#3: its handoff says base `main`, but its branch sits on `feat/1-one`; ship uses `feat/1-one`"])
+        self.assertEqual([(t["id"], t["parent"]) for t in out["stacks"][0]["tickets"]], [("1", "main"), ("3", "feat/1-one")])
+        self.assertIn("base: main", note.read_text())  # plan changes nothing
+        built = self.stack("build")
+        self.assertEqual([t["status"] for t in built["stacks"][0]["tickets"]], ["built", "built"])
+        self.assertIn("base: feat/1-one", note.read_text())
+        self.assertIn("--base feat/1-one", next(c for c in built["stacks"][0]["commands"] if "--head feat/3-three" in c))
+        self.assertEqual(self.stack("plan")["warnings"], [])  # the note follows git now
+
+    def on_my_open_pr(self):
+        """#1 is shipped: its branch is pushed, and it is my open PR #81. #3 sits on it, rebased by hand."""
+        self.rebased_by_hand()
+        git("-C", str(self.worktree("1")), "push", "-q", "origin", "feat/1-one")
+        stacking.set_meta(self.state / "handoffs" / "1.md", "status", "shipped")
+        cfg = json.loads((self.state / "config.json").read_text())
+        (self.state / "config.json").write_text(json.dumps({**cfg, "repo": "o/app"}))
+        return [{"number": 81, "headRefName": "feat/1-one", "baseRefName": "main", "author": {"login": "me"}, "url": "u"}]
+
+    def ship(self, prs, *args):
+        with mock.patch.object(al, "gh_json", lambda *a: prs), mock.patch.object(al, "gh", lambda *a: "me\n"):
+            return self.stack("build", None, *args)
+
+    def test_a_ticket_whose_pr_is_open_ships_again_onto_the_pr_below_it(self):
+        """Run again for review feedback, the ticket is ready while its PR is open. Its own PR is
+        the top of my open stack: the ticket must not go on top of itself."""
+        prs = self.on_my_open_pr()
+        prs.append({"number": 96, "headRefName": "feat/3-three", "baseRefName": "feat/1-one", "author": {"login": "me"}, "url": "u"})
+        [s] = self.ship(prs)["stacks"]
+        self.assertEqual(s["anchor"], {"kind": "own", "branch": "feat/1-one", "prs": [81]})
+        self.assertEqual([(t["id"], t["status"], t["parent"]) for t in s["tickets"]], [("3", "built", "feat/1-one")])
+        self.assertIn("gh pr edit 96 -R o/app --base feat/1-one", s["commands"])
+        self.assertTrue(s["commands"][-1].endswith("gh stack link 81 feat/3-three"), s["commands"][-1])
+
+    def test_a_ticket_on_local_changes_of_an_open_pr_waits_for_their_push(self):
+        """I amended the branch of my open PR and put the ticket on it, without pushing. Ship must not
+        move the ticket back onto the pushed copy, nor publish it on top of commits GitHub lacks."""
+        prs = self.on_my_open_pr()
+        wt1, wt3 = self.worktree("1"), self.worktree("3")
+        git("-C", str(wt1), "commit", "-q", "--amend", "-m", "feat: ticket 1, after review")
+        git("-C", str(wt3), "rebase", "-q", "--onto", "feat/1-one", "HEAD^")
+        before = git("-C", str(wt3), "rev-parse", "HEAD")
+        [s] = self.ship(prs)["stacks"]
+        t3 = s["tickets"][0]
+        self.assertEqual(t3["status"], "stopped", t3)
+        self.assertIn("`feat/1-one` has 1 local commit(s) that are not on origin", t3["reason"])
+        self.assertIn(f"git -C {wt3} push --force-with-lease origin feat/1-one", t3["reason"])
+        self.assertEqual(git("-C", str(wt3), "rev-parse", "HEAD"), before)
+        self.assertEqual(s["commands"], [])
+        git("-C", str(wt1), "push", "-q", "--force", "origin", "feat/1-one")  # pushed: the ticket ships where it is
+        [s] = self.ship(prs)["stacks"]
+        self.assertEqual((s["tickets"][0]["status"], s["tickets"][0]["parent"]), ("built", "feat/1-one"))
+        self.assertEqual(git("-C", str(wt3), "rev-parse", "HEAD"), before)
+
+    def test_a_ticket_rebased_onto_my_open_pr_joins_that_stack(self):
+        """The ticket's handoff says the trunk; its branch is one commit on top of an open PR's branch.
+        It must not count that PR's commits as its own and ask to squash them."""
+        prs = self.on_my_open_pr()
+        wt = self.worktree("3")
+        before = git("-C", str(wt), "rev-parse", "HEAD")
+        out = self.ship(prs)
+        [s] = out["stacks"]
+        self.assertEqual(s["anchor"], {"kind": "own", "branch": "feat/1-one", "prs": [81]})
+        self.assertEqual(out["squash"], [])
+        self.assertEqual([(t["id"], t["status"], t["parent"]) for t in s["tickets"]], [("3", "built", "feat/1-one")])
+        self.assertIn("sits on `feat/1-one` (PR #81)", out["warnings"][0])
+        self.assertEqual(git("-C", str(wt), "rev-parse", "HEAD"), before)  # already there: nothing moved
+        self.assertIn("--base feat/1-one", "\n".join(s["commands"]))
+
+    def test_a_branch_ship_does_not_know_is_never_squashed_into_the_ticket(self):
+        self.start("3")
+        self.finish_ready("3", change="three = 3\n")
+        git("-C", str(self.clone), "checkout", "-q", "-b", "spike")
+        (self.clone / "spike.py").write_text("s = 1\n")
+        git("-C", str(self.clone), "add", "spike.py")
+        git("-C", str(self.clone), "commit", "-qm", "spike")
+        git("-C", str(self.clone), "checkout", "-q", "main")
+        wt = self.worktree("3")
+        git("-C", str(wt), "rebase", "-q", "spike")
+        before = git("-C", str(wt), "rev-parse", "HEAD")
+        out = self.stack("build", None, "--squash")
+        t3 = out["stacks"][0]["tickets"][0]
+        self.assertEqual(t3["status"], "stopped")
+        self.assertIn("include the branch `spike`", t3["reason"])
+        self.assertIn(f"rebase --onto origin/main spike", t3["reason"])
+        self.assertEqual(git("-C", str(wt), "rev-parse", "HEAD"), before)
+        self.assertEqual(git("-C", str(wt), "log", "-2", "--format=%s"), "feat: ticket 3\nspike")
+
+    def test_a_ticket_stays_on_a_branch_that_changed_under_it(self):
+        """#2 was built on #1; #1's commit was amended since. #2 still belongs on #1, not on the trunk."""
+        self.finished(["1", "2", "3"])
+        self.stack("build")
+        git("-C", str(self.worktree("1")), "commit", "-q", "--amend", "-m", "feat: ticket 1, reworded")
+        out = self.stack("plan")
+        self.assertEqual(out["warnings"], [])
+        self.assertEqual([t["parent"] for t in out["stacks"][0]["tickets"]], ["main", "feat/1-one", "feat/2-two"])
+
+    def test_the_risk_paths_are_what_the_ticket_changes_on_its_parent(self):
+        cfg = json.loads((self.state / "config.json").read_text())
+        (self.state / "config.json").write_text(json.dumps({**cfg, "sensitivePaths": ["secrets/"]}))
+        self.start("1", "3")
+        (self.worktree("1") / "secrets").mkdir()
+        (self.worktree("1") / "secrets" / "k.py").write_text("k = 1\n")
+        self.finish_ready("1")
+        self.finish_ready("3", change="three = 3\n")
+        one, three = self.state / "handoffs" / "1.md", self.state / "handoffs" / "3.md"
+        stacking.set_meta(three, "updated", "2099-01-01T00:00:00")
+        stacking.set_meta(three, "risk", "high")               # what a diff against the wrong base found:
+        stacking.set_meta(three, "sensitive", "secrets/k.py")  # #1's file
+        out = self.stack("build")
+        t1, t3 = out["stacks"][0]["tickets"]
+        self.assertEqual((t1["risk"], t1["sensitive"]), ("high", "secrets/k.py"))
+        self.assertEqual((t3["risk"], t3.get("sensitive")), ("normal", None))
+        self.assertIn("risk: high\n", one.read_text())
+        self.assertIn("sensitive: secrets/k.py\n", one.read_text())
+        self.assertIn("risk: normal", three.read_text())
+        self.assertNotIn("sensitive:", three.read_text())
+
+
 class PlanTest(unittest.TestCase):
     """Which stack the tickets join: the trunk, the user's own open stack, or someone else's branch."""
 
@@ -288,6 +422,12 @@ class PlanTest(unittest.TestCase):
         foreign = kinds["foreign"]
         self.assertEqual([(t["parent"], t["rebase"]) for t in foreign["tickets"]], [("feat/theirs", False)])
         self.assertFalse(foreign["link"])
+
+    def test_a_tickets_own_open_pr_is_not_part_of_the_stack_below_it(self):
+        mine = {"number": 13, "headRefName": "feat/1", "baseRefName": "feat/c", "author": {"login": "me"}}
+        [s] = stacking.plan([self.t("1", "feat/c", "1")], "main", "sprint", self.PRS + [mine], "me", True)
+        self.assertEqual(s["anchor"], {"kind": "own", "branch": "feat/c", "prs": [10, 11, 12]})
+        self.assertEqual(s["tickets"][0]["parent"], "feat/c")
 
     def test_a_merged_base_goes_onto_the_trunk(self):
         stacks = stacking.plan([self.t("1", "feat/gone", "1")], "main", "sprint", self.PRS, "me", True)

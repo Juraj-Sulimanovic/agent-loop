@@ -124,6 +124,20 @@ class ReviewTest(unittest.TestCase):
         self.assertIn("risk: high\nsensitive: app.py", note)
         self.assertIn("HIGH RISK", runner.status_text(run.state()))
 
+    def test_a_fix_that_touches_a_sensitive_path_raises_the_risk(self):
+        agent = Agent(self.wt, {("0", "correctness"): [finding("Blank name accepted", "missing ValueError")]})
+
+        def touching(**kw):
+            if Path(kw["log_path"]).name.split(".")[1] == "fix1":
+                (self.wt / "secrets.py").write_text("k = 1\n")
+            return agent(**kw)
+
+        summary, run = self.run_loop(touching, sensitivePaths=["secrets.py"])
+        self.assertNotIn("review-security", agent.calls)
+        self.assertIn("review1-security", agent.calls)                           # checked again after the fix
+        self.assertEqual(summary["ready"][0]["risk"], "high")
+        self.assertIn("risk: high\nsensitive: secrets.py", (self.state / "handoffs" / "1.md").read_text())
+
     def test_majority_refutes(self):
         agent = Agent(self.wt, {("0", "security"): [finding("Token logged", "secret in logs")]},
                       votes={"verify-1-v1": "refuted", "verify-1-v2": "refuted"})

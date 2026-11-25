@@ -622,9 +622,11 @@ def slug_of(card: dict) -> str:
     return f"{card['id'].lower()}-{words}"[:70].rstrip("-")
 
 
-def worktree_in_use(p: Project, ticket_id: str, path: str) -> bool:
-    """A ticket's worktree holds work when it has changes, commits past the base, or a handoff note.
-    An untouched one (prepared, then deferred) is reused rather than blocking the ticket."""
+def worktree_in_use(p: Project, ticket_id: str, path: str, base: str = "") -> bool:
+    """A ticket's worktree holds work when it has changes, commits past its base, or a handoff note.
+    An untouched one (prepared, then deferred) is reused rather than blocking the ticket. `base` is
+    the branch it sits on: a worktree made on another ticket's branch is ahead of the trunk from
+    the start."""
     if (p.dir / "handoffs" / f"{ticket_id}.md").is_file():
         return True
     wt = Path(path)
@@ -632,12 +634,48 @@ def worktree_in_use(p: Project, ticket_id: str, path: str) -> bool:
         return False
     if git(wt, "status", "--porcelain", "--untracked-files=no", check=False).strip():
         return True  # untracked files alone (a copied .env, caches) are setup, not work
-    ahead = git(wt, "rev-list", "--count", f"{p.config['base']}..HEAD", check=False).strip()
+    ahead = git(wt, "rev-list", "--count", f"{base or p.config['base']}..HEAD", check=False).strip()
     return ahead not in ("", "0")
 
 
-def classify(p: Project, s: Snapshot, card: dict) -> dict:
-    """One ticket object: what it is, whether an agent may start it, and on which base."""
+def worktree_base(p: Project, s: Snapshot, card: dict, branch: str, path: str) -> str:
+    """The base of a ticket that already has a worktree: the branch its work sits on, read from git.
+
+    Its blockers' branches come first, then every other open PR and ticket worktree. A branch
+    that builds on this ticket (a PR onto its branch, a ticket it blocks) is above it, never its base."""
+    import stacking
+    cid, cards = card["id"], s.by_id()
+    note = p.dir / "handoffs" / f"{cid}.md"
+    h = read_handoff(note) if note.is_file() else {}
+    above = {x["headRefName"] for x in s.open_prs if x["baseRefName"] == branch}
+    above |= {b for b in s.worktrees if cid in (cards.get(s.branch_id(b) or "") or {}).get("blockers", [])}
+    first = [x["headRefName"] for b in card["blockers"] if (x := s.pr_for(b))]
+    rest = [x["headRefName"] for x in s.open_prs] + [b for b in s.worktrees if s.branch_id(b)]
+    branches = [b for b in dict.fromkeys(first + rest) if b != branch and b not in above]
+    return stacking.sits_on(path, branches, p.config["base"], noted=h.get("base", ""), own=h.get("commit", ""))
+
+
+def stack_top(p: Project, s: Snapshot, blockers: list[str]) -> tuple[dict | None, list[dict]]:
+    """The top pull request of the one open stack that holds the pull requests of all `blockers`
+    (each has one). A ticket that needs them starts there, not on a blocker's own branch: a pull
+    request stacked above a blocker is part of what it builds on, and its own goes on top.
+
+    (None, the top of each stack) when the blockers are on separate stacks."""
+    import stacking
+    trunk = stacking.trunk_of(p.config["base"])
+    prs = [s.pr_for(b) for b in blockers]
+    chains = [stacking.chain_of(s.open_prs, pr, trunk) for pr in prs]
+    for chain in chains:
+        if {pr["number"] for pr in prs} <= {x["number"] for x in chain}:
+            return chain[-1], []
+    return None, list({c[-1]["number"]: c[-1] for c in chains}.values())
+
+
+def classify(p: Project, s: Snapshot, card: dict, running: set[str] | frozenset[str] = frozenset()) -> dict:
+    """One ticket object: what it is, whether an agent may start it, and on which base.
+
+    `running` are the tickets a run has prepared. A blocker among them needs no pull request: the
+    ticket waits for it in that run (`waitFor`) and is moved onto its commit then."""
     tcfg = p.config["tracker"]
     cards = s.by_id()
     done = set(tcfg["done"])
@@ -656,18 +694,40 @@ def classify(p: Project, s: Snapshot, card: dict) -> dict:
         open_blockers.append(b)
 
     base, status, reason = p.config["base"], "ready", ""
+    waiting_for: list[str] = []
     wt, pr = s.worktree_for(cid), s.pr_for(cid)
     ref = s.tracker.ref
+    # Started work keeps the base it really has: a second run of a stacked ticket must not see the
+    # trunk, or its diff, its risk paths and its handoff `base:` take in the branch below it.
+    if wt and Path(wt[1]).is_dir():
+        base = worktree_base(p, s, card, *wt)
+    elif pr:
+        base = f"origin/{pr['baseRefName']}"
     if pr:
         status, reason = "in-flight", f"PR #{pr['number']} open"
-    elif wt and worktree_in_use(p, cid, wt[1]):
+    elif wt and worktree_in_use(p, cid, wt[1], base):
         status, reason = "in-flight", f"worktree {wt[1]}"
     elif open_blockers:
-        stack = [s.pr_for(b) for b in open_blockers]
-        if len(open_blockers) == 1 and stack[0]:
-            base, reason = f"origin/{stack[0]['headRefName']}", f"stacked on {ref(open_blockers[0])} (PR #{stack[0]['number']})"
-        else:
-            status, reason = "blocked", "waiting on " + ", ".join(ref(b) for b in open_blockers)
+        waits = [b for b in open_blockers if b in running]
+        built = [b for b in open_blockers if b not in running]
+        missing = [b for b in built if not s.pr_for(b)]
+        if missing:  # no branch to build on, and it is not made in this run
+            status, reason = "blocked", "waiting on " + ", ".join(ref(b) for b in missing)
+        elif built:
+            numbers = {b: s.pr_for(b)["number"] for b in built}
+            named = ", ".join(f"{ref(b)} (PR #{n})" for b, n in numbers.items())
+            top, tops = stack_top(p, s, built)
+            if top:
+                base, reason = f"origin/{top['headRefName']}", f"stacked on {named}"
+                if top["number"] not in numbers.values():
+                    reason += f", at the top of that stack (PR #{top['number']})"
+            else:
+                status, reason = "blocked", (f"waiting on {named}: they are on separate stacks, "
+                                             + " and ".join(f"`{x['headRefName']}` (PR #{x['number']})" for x in tops))
+        if waits:
+            waiting_for = waits
+            if status != "blocked":
+                reason = "; ".join(x for x in (reason, "waits for " + ", ".join(ref(b) for b in waits)) if x)
 
     branch = wt[0] if wt else p.config["branch"].format(type=kind, slug=slug_of(card), id=cid)
     return {
@@ -684,6 +744,7 @@ def classify(p: Project, s: Snapshot, card: dict) -> dict:
         "branch": branch,
         "base": base,
         "worktree": wt[1] if wt else str(p.worktree(cid)),
+        **({"waitFor": waiting_for} if waiting_for else {}),
     }
 
 
@@ -1149,22 +1210,40 @@ def prepare(p: Project, s: Snapshot, ids: list[str], force: bool = False,
             waiting: dict[str, list[str]] | None = None) -> tuple[list[dict], list[dict]]:
     """Create or reuse each ticket's worktree and run setup; returns (prepared tickets, skipped ones).
 
-    `waiting` maps a blocked ticket to the tickets of this same run it waits for: it is prepared
-    like a ready one and carries `waitFor`, so the workflow can start it once those are done."""
+    `waiting` maps a ticket to the tickets of this same run it waits for: it is prepared like a
+    ready one and carries `waitFor`, so the run can start it once those are done. That holds only
+    for the blockers that really are prepared here. A ticket stays out of the run unless each of
+    its blockers is prepared in it or has a pull request on the one stack the ticket starts on:
+    without its blocker in the run, nothing would hold it back from starting on the trunk."""
     waiting = waiting or {}
-    by = s.by_id()
+    by, ref = s.by_id(), s.tracker.ref
+    ids = list(dict.fromkeys(ids))
     git(p.root, "fetch", "-q", "origin")
-    tickets, skipped = [], []
+    order: list[str] = []  # a ticket comes after its blockers: whether they were prepared decides if it runs
+    seen: set[str] = set()
+
+    def visit(cid: str) -> None:
+        if cid in seen:
+            return
+        seen.add(cid)
+        for b in (by.get(cid) or {}).get("blockers", []):
+            if b in ids:
+                visit(b)
+        order.append(cid)
+
     for cid in ids:
+        visit(cid)
+    done: dict[str, dict] = {}     # id -> the prepared ticket
+    out: dict[str, dict] = {}      # id -> the skipped one, with `error`
+    for cid in order:
         if cid not in by:
-            skipped.append({"id": cid, "error": "not on the board"})
+            out[cid] = {"id": cid, "error": "not on the board"}
             continue
-        t = classify(p, s, by[cid])
+        t = classify(p, s, by[cid], {b for b in waiting.get(cid, []) if b in done})
         wt = Path(t["worktree"])
-        if t["status"] == "blocked" and cid in waiting:
-            t["waitFor"] = waiting[cid]
-        elif t["status"] == "blocked" and not force:
-            skipped.append({**t, "error": t["reason"]})
+        if t["status"] == "blocked" and not force:
+            gone = [f"{ref(b)} is not in this run ({out[b]['error'].split('; ')[0]})" for b in t["blockers"] if b in out]
+            out[cid] = {**t, "error": "; ".join([t["reason"], *gone])}
             continue
         if not wt.exists():
             wt.parent.mkdir(parents=True, exist_ok=True)
@@ -1177,10 +1256,10 @@ def prepare(p: Project, s: Snapshot, ids: list[str], force: bool = False,
         t["setup"] = run_setup(p, wt)
         failed = [x for x in t["setup"] if not x["ok"]]
         if failed:
-            skipped.append({**t, "error": f"setup failed: {failed[0]['cmd']}: {failed[0]['tail']}"})
+            out[cid] = {**t, "error": f"setup failed: {failed[0]['cmd']}: {failed[0]['tail']}"}
         else:
-            tickets.append(t)
-    return tickets, skipped
+            done[cid] = t
+    return [done[cid] for cid in ids if cid in done], [out[cid] for cid in ids if cid in out]
 
 
 def run_project(p: Project) -> dict:
@@ -1202,6 +1281,38 @@ def runs_dir(p: Project) -> Path:
     return p.dir / "runs"
 
 
+def select_tickets(p: Project, s: Snapshot, wanted: list[str]) -> tuple[list[str], dict[str, list[str]]]:
+    """The tickets of a new run: (ids, waiting). Without `wanted`, every ready ticket of the Ready
+    column. When the project commits at handoff, also the tickets with a blocker that runs in this
+    run: `waiting` maps each of them to those blockers, and it starts when they are done. Each
+    other blocker of such a ticket must have a pull request, all on one stack (`classify`).
+
+    A ticket runs here only if it is ready, or was asked for and is not blocked, or waits for
+    tickets that run here. So a blocked ticket never counts as a running blocker: `prepare` would
+    skip it, and the ticket that waits for it would start without it."""
+    ready = p.config["tracker"]["columns"]["ready"]
+    by = s.by_id()
+    ids = list(dict.fromkeys(picked_ids(s, wanted))) if wanted else [
+        c["id"] for c in s.board.cards if c["status"] == ready and classify(p, s, c)["status"] == "ready"]
+    waiting: dict[str, list[str]] = {}
+    if p.config["commitAtHandoff"]:
+        pool = [cid for cid in ids if cid in by] if wanted else [c["id"] for c in s.board.cards if c["status"] == ready]
+        runs = {cid for cid in ids if cid in by and classify(p, s, by[cid])["status"] != "blocked"}
+        more = True
+        while more:  # a ticket that joins lets the tickets it blocks join in turn
+            more = False
+            for cid in pool:
+                if cid in runs:
+                    continue
+                c = classify(p, s, by[cid], runs)
+                if c["status"] != "blocked" and c.get("waitFor"):
+                    waiting[cid] = c["waitFor"]
+                    runs.add(cid)
+                    more = True
+        ids = list(dict.fromkeys(ids + [cid for cid in pool if cid in waiting]))
+    return ids, waiting
+
+
 def cmd_run(a) -> None:
     """Start a run (prepare the tickets, then the loop), or resume one."""
     import runner
@@ -1218,14 +1329,10 @@ def cmd_run(a) -> None:
         s = snapshot(p)
         if not s.board.cards:
             raise SystemExit("\n".join(s.errors) or "The board has no tickets.")
-        if a.ids:
-            ids = picked_ids(s, a.ids)
-        else:
-            ready = p.config["tracker"]["columns"]["ready"]
-            ids = [c["id"] for c in s.board.cards if c["status"] == ready and classify(p, s, c)["status"] == "ready"]
+        ids, waiting = select_tickets(p, s, a.ids)
         if not ids:
             raise SystemExit("No ready tickets.")
-        tickets, skipped = prepare(p, s, ids, a.force)
+        tickets, skipped = prepare(p, s, ids, a.force, waiting)
         for x in skipped:
             print(f"skipped {s.tracker.ref(x['id'])}: {x['error']}", file=sys.stderr)
         if not tickets:
@@ -1247,26 +1354,9 @@ def cmd_run(a) -> None:
                           "tickets": [t["ref"] for t in run.tickets]}))
         return
     import adapters
-    summary = runner.Loop(run, adapters.run_agent).execute()
+    summary = runner.Loop(run, adapters.run_agent,
+                          stack=lambda tid, onto, needs: stack_ticket(p, run, tid, onto, needs)).execute()
     print(json.dumps({"run": run.id, **summary}, indent=2))
-
-
-def commit_ticket(wt: Path, message: str, base: str = "") -> tuple[str, str]:
-    """Commit a ready ticket's staged change on its branch, locally: (commit, error).
-
-    A Python step makes this commit, not an agent, so a ticket waiting on this one can build on
-    it. Signing and commit hooks run as configured; push and the pull request wait for the ship
-    skill and the user's approval."""
-    if subprocess.run(["git", "-C", str(wt), "diff", "--cached", "--quiet"]).returncode == 0:
-        # Already committed by an earlier handoff of this ticket (a resumed run): keep that commit.
-        if base and git(wt, "rev-list", "--count", f"{base}..HEAD", check=False).strip() not in ("", "0"):
-            return git(wt, "rev-parse", "HEAD").strip(), ""
-        return "", "nothing is staged"
-    out = subprocess.run(["git", "-C", str(wt), "commit", "-q", "-m", message], capture_output=True, text=True,
-                         stdin=subprocess.DEVNULL, timeout=300)
-    if out.returncode:
-        return "", (out.stderr or out.stdout).strip()[-500:] or f"exit {out.returncode}"
-    return git(wt, "rev-parse", "HEAD").strip(), ""
 
 
 def reline(p: Project, run, x: dict, below: dict) -> dict | None:
@@ -1346,8 +1436,9 @@ def stack_ticket(p: Project, run, tid: str, onto: str, needs: list[str]) -> dict
     The waiting ticket has only been planned: its worktree must hold no tracked change and no
     commit past its base. When it needs finished tickets that are on separate branches, they are
     put in a line first, each on the one before (`reline`), and it goes on the top one. A branch
-    that another ticket of the run builds on is never moved. A conflict or a failing check answers
-    `resolve`: the workflow runs that agent, then calls this again, which carries on."""
+    that another ticket of the run builds on is never moved. A ticket that an earlier call already
+    moved there is left alone. A conflict or a failing check answers
+    `resolve`: the caller runs that agent, then calls this again, which carries on."""
     def fail(reason: str) -> dict:
         return {"ok": False, "reason": reason, "base": "", "tree": "", "resolve": None}
 
@@ -1358,21 +1449,28 @@ def stack_ticket(p: Project, run, tid: str, onto: str, needs: list[str]) -> dict
         return fail(f"#{tid} or #{onto} is not in this run")
     for need in [onto, *needs]:
         if (state.get(need) or {}).get("status") != "ready" or not (state.get(need) or {}).get("commit"):
-            return fail(f"{(by.get(need) or {}).get('ref', '#' + need)} is not committed and ready")
+            return fail(f"{(by.get(need) or {}).get('ref', '#' + need)} is not committed and ready; "
+                        f"finish it first (its handoff note says what it needs), then run {t['ref']} again")
     wt = Path(t["worktree"])
-    if git(wt, "status", "--porcelain", "--untracked-files=no", check=False).strip():
-        return fail(f"{t['ref']} has changes in its worktree")
-    if git(wt, "rev-list", "--count", f"{t['base']}..HEAD", check=False).strip() not in ("", "0"):
-        return fail(f"{t['ref']} has commits of its own")
-
     import stacking
     contains = lambda a, b: stacking.is_ancestor(wt, b, a)  # noqa: E731
     members = list(dict.fromkeys(n for n in [*needs, onto] if n in by))
+    if t["base"] in {x["branch"] for x in run.tickets if x["id"] != tid} and all(contains("HEAD", by[m]["branch"]) for m in members):
+        # An earlier call moved it there (a resumed run asks again): it may hold work by now, so it stays as it is.
+        return {"ok": True, "reason": "", "base": t["base"], "tree": git(wt, "write-tree", check=False).strip(), "resolve": None}
+    if git(wt, "status", "--porcelain", "--untracked-files=no", check=False).strip():
+        return fail(f"{t['ref']} has changes in its worktree ({wt}); commit or discard them, then run it again")
+    ahead = git(wt, "rev-list", "--count", f"{t['base']}..HEAD", check=False).strip()
+    if ahead not in ("", "0"):
+        return fail(f"{t['ref']} has commits of its own: its branch is {ahead} ahead of {t['base']} "
+                    f"(`git -C {wt} log {t['base']}..HEAD`); if they are not this ticket's work, run "
+                    f"`git -C {wt} reset --hard {t['base']}`, then run it again")
     tips = [m for m in members if not any(o != m and contains(by[o]["branch"], by[m]["branch"]) for o in members)]
     for below, x in zip(tips, tips[1:]):
         users = [u["ref"] for u in run.tickets if u["id"] not in (tid, x) and u.get("base") == by[x]["branch"]]
         if users:
-            return fail(f"{by[x]['ref']} cannot move onto {by[below]['ref']}: {', '.join(users)} build on it")
+            return fail(f"{by[x]['ref']} cannot move onto {by[below]['ref']}: {', '.join(users)} build on it; "
+                        f"ship those first, then run {t['ref']} again")
         stop = reline(p, run, by[x], by[below])
         if stop:
             return {**fail(stop.get("reason", "")), "resolve": stop.get("resolve")}
@@ -1380,7 +1478,12 @@ def stack_ticket(p: Project, run, tid: str, onto: str, needs: list[str]) -> dict
     top = by[tips[-1]]
     for must in [t["base"], *(by[n]["branch"] for n in members)]:
         if not contains(top["branch"], must):
-            return fail(f"{top['ref']}'s branch does not contain {must}: the work is on separate branches")
+            if must == t["base"]:
+                behind = git(wt, "rev-list", "--count", f"{top['branch']}..{must}", check=False).strip() or "some"
+                return fail(f"{top['ref']}'s branch is {behind} commit(s) behind {must}; rebase it "
+                            f"(`git -C {top['worktree']} rebase {must}`), then run {t['ref']} again")
+            return fail(f"{top['ref']}'s branch does not contain {must}: the work is on separate branches; "
+                        f"rebase {top['branch']} onto {must}, then run {t['ref']} again")
     target = top["branch"]
     git(wt, "reset", "-q", "--hard", target)
     t["base"] = target
@@ -1421,7 +1524,27 @@ def cmd_stack(a) -> None:
         warnings.append("`gh stack` is not installed: the PRs are chained, but GitHub gets no stack "
                         "(gh extension install github/gh-stack)")
         link = False
-    stacks = stacking.plan(ready, stacking.trunk_of(cfg["base"]), mode, prs, me, link)
+    if a.action == "build":
+        git(p.root, "fetch", "-q", "origin")
+    # A handoff's `base:` is what the loop wrote. Where the branch sits now comes from git: the
+    # developer may have rebased the ticket onto another branch since.
+    trunk = stacking.trunk_of(cfg["base"])
+    for h in ready:
+        if not Path(h.get("worktree") or "").is_dir():
+            continue
+        above = {x["headRefName"] for x in prs if x["baseRefName"] == h["branch"]} | {x["branch"] for x in ready if x.get("base") == h["branch"]}
+        branches = [b for b in dict.fromkeys([x["headRefName"] for x in prs] + [x["branch"] for x in ready])
+                    if b != h["branch"] and b not in above]
+        noted = h.get("base") or trunk
+        h["sitsOn"] = stacking.sits_on(h["worktree"], branches, cfg["base"], noted=noted, own=h.get("commit", ""))
+        real = stacking.trunk_of(h["sitsOn"])
+        if real != noted:
+            pr = next((f" (PR #{x['number']})" for x in prs if x["headRefName"] == real), "")
+            warnings.append(f"{t.ref(h['id'])}: its handoff says base `{noted}`, but its branch sits on `{real}`{pr}; ship uses `{real}`")
+            h["base"] = real
+            if a.action == "build":
+                stacking.set_meta(Path(h["path"]), "base", real)
+    stacks = stacking.plan(ready, trunk, mode, prs, me, link)
     squash = []
     for s in stacks:
         for x in s["tickets"]:
@@ -1430,7 +1553,6 @@ def cmd_stack(a) -> None:
             if own and len(own) > 1:
                 squash.append({"ref": t.ref(x["id"]), "id": x["id"], "worktree": x["worktree"], "commits": len(own)})
     if a.action == "build":
-        git(p.root, "fetch", "-q", "origin")
         import adapters
         builder = stacking.Builder(run_project(p), cfg, p.dir, stacking.run_dir_for(p.dir), adapters.run_agent, ref=t.ref,
                                    squash=a.squash)
@@ -1448,7 +1570,7 @@ def cmd_wf(a) -> None:
 
     start     prepare the tickets and the run folder; print the workflow's arguments
     checks    run the checks in a worktree; report the risky paths and the staged tree
-    handoff   write a ticket's handoff note from <run dir>/<id>.handoff.json
+    handoff   write a ticket's handoff note and plan file from <run dir>/<id>.handoff.json; commit it
     attach    record the Workflow's id and transcript folder, so the panel can show live progress
     finish    record the workflow's summary (<run dir>/summary.json) in run.json
     """
@@ -1483,19 +1605,7 @@ def cmd_wf(a) -> None:
         s = snapshot(p)
         if not s.board.cards:
             raise SystemExit("\n".join(s.errors) or "The board has no tickets.")
-        ready = p.config["tracker"]["columns"]["ready"]
-        wanted = ([a.target] if a.target else []) + a.ids
-        ids = picked_ids(s, wanted) if wanted else [c["id"] for c in s.board.cards
-                                                    if c["status"] == ready and classify(p, s, c)["status"] == "ready"]
-        waiting: dict[str, list[str]] = {}
-        if p.config["commitAtHandoff"]:
-            by, pool = s.by_id(), set(ids)
-            if not wanted:  # also blocked Ready-column tickets whose blockers all run now
-                pool |= {c["id"] for c in s.board.cards if c["status"] == ready}
-            for cid in sorted(pool):
-                if cid in by and (c := classify(p, s, by[cid]))["status"] == "blocked" and set(c["blockers"]) <= pool:
-                    waiting[cid] = c["blockers"]
-            ids = list(dict.fromkeys(ids + [cid for cid in waiting if cid not in ids]))
+        ids, waiting = select_tickets(p, s, ([a.target] if a.target else []) + a.ids)
         if not ids:
             raise SystemExit("No ready tickets.")
         tickets, skipped = prepare(p, s, ids, a.force, waiting)
@@ -1539,11 +1649,14 @@ def cmd_wf(a) -> None:
         t = next(x for x in run.tickets if x["id"] == a.id)
         res = {"status": data.get("status", "needs-human"), "why": data.get("why", ""), "preExisting": data.get("preExisting") or []}
         if res["status"] == "ready" and p.config["commitAtHandoff"]:
-            commit, error = commit_ticket(Path(t["worktree"]), (data.get("commitMessage") or "").strip() or t["name"], t["base"])
+            commit, error = runner.commit_ticket(t["worktree"], (data.get("commitMessage") or "").strip() or t["name"], t["base"])
             if error:
                 res.update(status="needs-human", why=f"the handoff commit failed: {error}")
             data["commit"] = commit
         path = runner.write_handoff_file(p.dir, run.id, t, res, data, data.get("sensitive") or [], data.get("outOfPlan") or [])
+        if (data.get("plan") or "").strip():  # the workflow has no files: the plan reaches plans/<id>.md here
+            (p.dir / "plans").mkdir(exist_ok=True)
+            (p.dir / "plans" / f"{a.id}.md").write_text(data["plan"].strip() + "\n")
         (run_dir / f"{a.id}.review.json").write_text(json.dumps(
             {"findings": data.get("findings") or [], "preExisting": res["preExisting"]}, indent=2))
         run.update(ticket=(a.id, {"stage": "done", "status": res["status"], "why": res["why"], "rounds": data.get("rounds", 0),
@@ -1551,14 +1664,16 @@ def cmd_wf(a) -> None:
         print(json.dumps({"path": str(path), "status": res["status"], "commit": data.get("commit") or ""}))
     elif a.action == "finish":
         summary = json.loads((run_dir / "summary.json").read_text())
-        # A handoff commit can fail after the workflow counted the ticket ready: run.json has the truth.
+        # run.json has the truth: a handoff commit can fail after the workflow counted the ticket
+        # ready, and a handoff that never ran leaves no note and no commit.
         state = run.state().get("tickets") or {}
         for r in list(summary.get("ready", [])):
             now_ = state.get(r["id"]) or {}
-            if now_.get("status") and now_["status"] != "ready":
+            if now_.get("status") != "ready" or (p.config["commitAtHandoff"] and not now_.get("commit")):
+                why = now_.get("why") if now_.get("status") in ("needs-human", "deferred") else ""
                 summary["ready"].remove(r)
                 summary.setdefault("needsHuman", []).append({"id": r["id"], "ref": r.get("ref"), "name": r.get("name"),
-                                                            "question": now_.get("why", "")})
+                                                            "question": why or "the handoff step did not finish; run the ticket again"})
         for d in summary.get("deferred", []):
             run.update(ticket=(d["id"], {"stage": "done", "status": "deferred", "why": d.get("reason", "")}))
         for n in summary.get("needsHuman", []):

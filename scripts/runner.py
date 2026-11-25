@@ -1,5 +1,7 @@
 """The sprint loop: plan every ticket, batch the ones that do not overlap, then implement ->
-independent review -> fix (bounded rounds) -> handoff per ticket, in parallel.
+independent review -> fix (bounded rounds) -> handoff per ticket, in parallel. When the project
+commits at handoff, a ticket that overlaps a running one, or that waits for one, starts when that
+one is ready, on top of its commit (the same as workflows/sprint.js).
 
 Each agent call goes through an adapter (`adapters.run_agent` by default), which runs Claude
 Code, Codex or Cursor headless in the ticket's worktree and returns the stage's JSON. Every
@@ -11,12 +13,14 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
 import re
 import subprocess
+import tempfile
 import threading
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -31,6 +35,8 @@ STAGES = ("plan", "implement", "review", "fix", "handoff")
 MODES = {"plan": "read", "implement": "write", "review": "check", "fix": "write", "handoff": "read"}
 
 Adapter = Callable[..., dict]
+Stacker = Callable[[str, str, list], dict]  # agentloop.stack_ticket for one run: (ticket, onto, needs)
+RESOLVE_ROUNDS = 6
 
 
 def render(template: str, /, **values) -> str:
@@ -58,12 +64,44 @@ DEFAULT_LENSES = ("spec", "correctness", "standards")
 SEVERITY = {"blocker": 0, "major": 1, "minor": 2}
 
 
+SANDBOX_CACHE = "cursor-sandbox-cache"
+
+
+def writable(directory: Path) -> bool:
+    """Whether a file can really be created in `directory` (made if missing). A sandbox can deny the
+    write even when access(2) says yes, so this tries it."""
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryFile(dir=directory):
+            return True
+    except OSError:
+        return False
+
+
+def check_env(env: dict | None = None) -> dict:
+    """The environment a check runs with. Cursor's sandbox points UV_CACHE_DIR at a private copy under
+    cursor-sandbox-cache, and the variable outlives the sandbox: a command allowed out of it still
+    inherits it, and that copy can hold metadata uv cannot read (uvx then fails with no output). Drop
+    it then, so uv uses its default cache, but only when that cache is writable from here: inside the
+    sandbox it is not, and unsetting would only trade the problem for a permission error. A cache
+    path set anywhere else (by a person or CI) is kept."""
+    env = dict(os.environ if env is None else env)
+    cache = env.get("UV_CACHE_DIR", "")
+    if SANDBOX_CACHE in Path(cache).parts:
+        base = Path(env["XDG_CACHE_HOME"]) if env.get("XDG_CACHE_HOME") else Path.home() / ".cache"
+        if writable(base / "uv"):
+            del env["UV_CACHE_DIR"]
+    return env
+
+
 def run_checks(worktree: str, checks: list[str], timeout: int = 900) -> list[dict]:
     """Run the configured checks in the worktree: objective, so the runner runs them, not an agent."""
     results = []
+    env = check_env()
     for cmd in checks:
         try:
-            r = subprocess.run(cmd, shell=True, cwd=worktree, capture_output=True, text=True, timeout=timeout)
+            r = subprocess.run(cmd, shell=True, cwd=worktree, capture_output=True, text=True, timeout=timeout,
+                               env=env)
             results.append({"cmd": cmd, "ok": r.returncode == 0, "tail": (r.stdout + r.stderr).strip()[-1500:]})
         except subprocess.TimeoutExpired:
             results.append({"cmd": cmd, "ok": False, "tail": f"timed out after {timeout // 60} min"})
@@ -151,6 +189,28 @@ def last_review_text(review: dict | None, last_ran: dict | None) -> str:
     return "Last review findings:\n" + lines(review) if review and review["findings"] else "The last review raised nothing."
 
 
+def commit_ticket(worktree: str, message: str, base: str = "") -> tuple[str, str]:
+    """Commit a ready ticket's staged change on its branch, locally: (commit, error).
+
+    A Python step makes this commit, not an agent, so a ticket waiting on this one can build on
+    it. Signing and commit hooks run as configured; push and the pull request wait for the ship
+    skill and the user's approval."""
+    wt = str(worktree)
+    if subprocess.run(["git", "-C", wt, "diff", "--cached", "--quiet"]).returncode == 0:
+        # Already committed by an earlier handoff of this ticket (a resumed run): keep that commit.
+        if base and git_out(wt, "rev-list", "--count", f"{base}..HEAD") not in ("", "0"):
+            return git_out(wt, "rev-parse", "HEAD"), ""
+        return "", "nothing is staged"
+    try:
+        out = subprocess.run(["git", "-C", wt, "commit", "-q", "-m", message], capture_output=True, text=True,
+                             stdin=subprocess.DEVNULL, timeout=300)
+    except subprocess.TimeoutExpired:
+        return "", "git commit timed out after 5 min"
+    if out.returncode:
+        return "", (out.stderr or out.stdout).strip()[-500:] or f"exit {out.returncode}"
+    return git_out(wt, "rev-parse", "HEAD"), ""
+
+
 def write_handoff_file(state_dir: Path, run_id: str, t: dict, res: dict, h: dict | None,
                        sensitive: list[str] | None = None, out_of_plan: list[str] | None = None) -> Path:
     """The handoff note the brief, the ship skill and the decisions log read. `res` is the
@@ -166,8 +226,13 @@ def write_handoff_file(state_dir: Path, run_id: str, t: dict, res: dict, h: dict
         front.append(f"sensitive: {', '.join(sensitive)}")
     if out_of_plan:
         front.append(f"outOfPlan: {', '.join(out_of_plan)}")
-    if h.get("commit"):
-        front.append(f"commit: {h['commit']}")
+    if h.get("commit") or res.get("commit"):
+        front.append(f"commit: {h.get('commit') or res['commit']}")
+    d = state_dir / "handoffs"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{t['id']}.md"
+    if path.is_file():  # a replayed handoff keeps the stacking step's note that an agent combined this ticket with another
+        front += re.findall(r"^resolved:.*$", path.read_text().split("\n---", 1)[0], re.M)[:1]
     text = "\n".join(front + ["---", "",
         "## Summary", (f"**Needs you:** {res['why']}\n\n" if res.get("why") and res.get("status") != "ready" else "")
         + (h.get("summary") or "").strip(), "",
@@ -182,9 +247,6 @@ def write_handoff_file(state_dir: Path, run_id: str, t: dict, res: dict, h: dict
         "## PR title", (h.get("prTitle") or "").strip(), "",
         "## PR changes", bullets(h.get("prChanges")), "",
     ])
-    d = state_dir / "handoffs"
-    d.mkdir(parents=True, exist_ok=True)
-    path = d / f"{t['id']}.md"
     path.write_text(text)
     return path
 
@@ -252,8 +314,9 @@ class Run:
 
 
 class Loop:
-    def __init__(self, run: Run, adapter: Adapter, checker: Callable[[str, list[str]], list[dict]] = run_checks):
-        self.run, self.adapter, self.checker = run, adapter, checker
+    def __init__(self, run: Run, adapter: Adapter, checker: Callable[[str, list[str]], list[dict]] = run_checks,
+                 stack: Stacker | None = None):
+        self.run, self.adapter, self.checker, self.stack = run, adapter, checker, stack
         self.p = run.project
         review = self.p.get("review") or {}
         self.lenses = [x for x in review.get("lenses", DEFAULT_LENSES) if x in LENSES] or list(DEFAULT_LENSES)
@@ -265,6 +328,8 @@ class Loop:
         self.checks = checks_line(self.p.get("checks") or [])
         self.parallel = max(1, min(int(self.p.get("maxParallel") or 10), 16))
         self.max_fix = max(0, min(int(self.p.get("maxFixRounds", 2)), 4))
+        self.commits = bool(self.p.get("commitAtHandoff"))
+        self.stacking = self.commits and stack is not None  # without a commit nothing can build on a finished ticket
 
     # --- one agent call, cached -------------------------------------------------
 
@@ -312,8 +377,8 @@ class Loop:
 
     # --- stages ---------------------------------------------------------------
 
-    def plan(self, t: dict) -> dict | None:
-        plan = self.call(t, "plan", "plan", render("plan", **self.values(t)), "plan")
+    def plan(self, t: dict, label: str = "plan") -> dict | None:
+        plan = self.call(t, label, "plan", render("plan", **self.values(t)), "plan")
         if plan and plan.get("planMarkdown"):
             plans = Path(self.p["dir"]) / "plans"
             plans.mkdir(parents=True, exist_ok=True)
@@ -343,19 +408,26 @@ class Loop:
             self.run.update(ticket=(t["id"], {"trees": trees}))
         return trees[step]
 
-    def risk(self, t: dict, plan: dict) -> list[str]:
-        """The sensitive paths the ticket's plan or staged change touches (empty: normal risk)."""
+    def risk(self, t: dict, plan: dict, round_: int = 0) -> list[str]:
+        """The sensitive paths the ticket's plan or staged change touches (empty: normal risk).
+
+        Looked at again in every review round, since a fix can touch one; each round's answer is
+        recorded, so a resumed run asks the same reviewers."""
         if not self.sensitive:
             return []
         state = self.ticket_state(t)
-        if "sensitive" in state:
-            return state["sensitive"]
-        changed = git_out(t["worktree"], "diff", "--cached", "--name-only", t["base"]).splitlines()
-        hits = sensitive_matches(list(plan.get("files") or []) + changed, self.sensitive)
-        self.run.update(ticket=(t["id"], {"risk": "high" if hits else "normal", "sensitive": hits}))
-        if hits:
-            self.run.log(f"{t['ref']} high risk: touches {', '.join(hits)}")
-        return hits
+        rounds = state.get("sensitiveRounds")
+        if rounds is None and "sensitive" in state:
+            return state["sensitive"]  # a run saved before rounds were recorded
+        rounds = rounds or {}
+        if str(round_) not in rounds:
+            changed = git_out(t["worktree"], "diff", "--cached", "--name-only", t["base"]).splitlines()
+            hits = sensitive_matches(list(plan.get("files") or []) + changed, self.sensitive)
+            if hits and hits != state.get("sensitive"):
+                self.run.log(f"{t['ref']} high risk: touches {', '.join(hits)}")
+            rounds[str(round_)] = hits
+            self.run.update(ticket=(t["id"], {"risk": "high" if hits else "normal", "sensitive": hits, "sensitiveRounds": rounds}))
+        return rounds[str(round_)]
 
     def review_file_note(self, t: dict) -> str:
         if self.review_file and (Path(t["worktree"]) / self.review_file).is_file():
@@ -407,7 +479,7 @@ class Loop:
         """
         suffix = str(round_) if round_ else ""
         checks = self.check_results(t, round_)
-        sensitive = self.risk(t, plan)
+        sensitive = self.risk(t, plan, round_)
         planned = list(plan.get("files") or [])
         changed = git_out(t["worktree"], "diff", "--cached", "--name-only", t["base"]).splitlines()
         outside = out_of_plan(changed, planned, self.scope_ignore)
@@ -553,6 +625,10 @@ class Loop:
                                                       + "\n".join(f"- {finding_text(f).splitlines()[0]}" for f in pre)) if pre else "",
                                      riskNote=(f"This change touches sensitive paths ({', '.join(sensitive)}); say in `risk` what a "
                                                "human reviewer must check there.") if sensitive else "")), "handoff")
+        if res["status"] == "ready" and self.commits:
+            res["commit"], error = commit_ticket(t["worktree"], ((h or {}).get("commitMessage") or "").strip() or t["name"], t["base"])
+            if error:
+                res.update(status="needs-human", why=f"the handoff commit failed: {error}")
         self.write_handoff(t, res, h, sensitive, (review or {}).get("outOfPlan"))
         return h or {}
 
@@ -567,9 +643,48 @@ class Loop:
             self.run.log(f"{t['ref']} build crashed: {e}")
             res = {"status": "needs-human", "why": f"build crashed: {e}", "rounds": 0}
         h = self.handoff(t, plan, res)
-        self.run.update(ticket=(t["id"], {"stage": "done", "status": res["status"], "why": res["why"]}))
+        self.run.update(ticket=(t["id"], {"stage": "done", "status": res["status"], "why": res["why"],
+                                          **({"commit": res.get("commit") or ""} if self.commits else {})}))
         self.run.log(f"{t['ref']} {res['status']}{': ' + res['why'] if res['why'] else ''}")
         return {"t": t, **res, "handoff": h}
+
+    # --- stacking: a waiting ticket moves onto the finished ones it waits on -------
+
+    def restack(self, t: dict, on: set, order: list[str], n: int) -> tuple[dict, dict | None, str]:
+        """Move waiting ticket `t` onto the finished tickets `on` and plan it there:
+        (ticket, plan, why it needs a human). `n` counts the ticket's moves in this run. The stack
+        step leaves alone a ticket that a stopped run already moved, so a resume is safe."""
+        by = {x["id"]: x for x in self.run.tickets}
+        onto = max(on, key=order.index)  # the one that finished last
+        needs = sorted(on - {onto})
+        moved: dict = {}
+        for _ in range(RESOLVE_ROUNDS):
+            try:
+                moved = self.stack(t["id"], onto, needs) or {}
+            except Exception as e:  # noqa: BLE001
+                moved = {"ok": False, "reason": str(e)}
+            ask = moved.get("resolve")
+            if not ask:
+                break
+            # Blockers on separate branches go in a line first; a conflict or a failing check
+            # there gets a resolve agent, then the stack step carries on from where it stopped.
+            x = by[ask["id"]]
+            k = self.ticket_state(x).get("resolves", 0) + 1  # a new label each time: a resume never reuses an old answer
+            self.run.update(ticket=(x["id"], {"resolves": k}))
+            self.run.log(f"{x['ref']}: {ask['why']}; a resolve agent combines them for {t['ref']}")
+            self.call(x, f"resolve{k}", "fix", ask["prompt"], "build")
+            self.run.update(ticket=(x["id"], {"stage": "done"}))
+        if not moved.get("ok"):
+            why = moved.get("reason") or (f"{moved['resolve']['ref']} still {moved['resolve']['why']}" if moved.get("resolve")
+                                          else "the stack step failed")
+            return t, None, f"cannot build on {by[onto]['ref']}: {why}"
+        t = next((x for x in self.run.tickets if x["id"] == t["id"]), t)
+        t["base"] = moved["base"]
+        self.run.log(f"{t['ref']}: moved onto {by[onto]['ref']} ({t['base']}); planning it on the new code")
+        plan = self.plan(t, f"plan{n + 1}")  # a new label per move: any earlier plan was made on another base
+        if not plan or not plan["feasible"]:
+            return t, None, (plan.get("question") or plan["summary"]) if plan else "the planner failed"
+        return t, plan, ""
 
     # --- the run --------------------------------------------------------------
 
@@ -579,31 +694,57 @@ class Loop:
         self.run.log(f"run {self.run.id}: {len(tickets)} ticket(s), tools " +
                      ", ".join(f"{s}={self.run.tool(s)}" for s in STAGES))
 
+        refs = {t["id"]: t["ref"] for t in tickets}
+        # A ticket that waits for others of this run is planned once, after it is moved onto their
+        # code: a plan made before that code exists is thrown away, and a false "infeasible" would stop it.
+        blockers_of = lambda t: {i for i in t.get("waitFor") or [] if i in refs} if self.stacking else set()  # noqa: E731
         with ThreadPoolExecutor(self.parallel) as pool:
-            plans = list(pool.map(self.plan, tickets))
+            plans = list(pool.map(lambda t: None if blockers_of(t) else self.plan(t), tickets))
 
         batch, deferred, needs_human, taken = [], [], [], {}
+        later = []  # {t, plan, on}: tickets that wait for others of this run (when it stacks)
         exclusive = self.p.get("exclusive") or []
+        names = lambda ids: ", ".join(refs.get(i, f"#{i}") for i in sorted(ids))  # noqa: E731
+        place = lambda claim: claim.split(":", 1)[1]  # noqa: E731
+
+        def defer(t: dict, reason: str) -> None:
+            deferred.append({"id": t["id"], "ref": t["ref"], "reason": reason})
+            self.run.update(ticket=(t["id"], {"stage": "done", "status": "deferred", "why": reason}))
+
+        def human(t: dict, question: str) -> None:
+            needs_human.append({"id": t["id"], "ref": t["ref"], "name": t["name"], "question": question})
+            self.run.update(ticket=(t["id"], {"stage": "done", "status": "needs-human", "why": question}))
+
+        def hold(t: dict, plan: dict, on: set) -> None:
+            later.append({"t": t, "plan": plan, "on": on})
+            why = f"waits for {names(on) if on else 'a free slot'}"
+            self.run.update(ticket=(t["id"], {"stage": "waiting", "why": why}))
+            self.run.log(f"{t['ref']}: {why}")
+
         for t, plan in zip(tickets, plans):
+            if blockers_of(t):
+                hold(t, None, blockers_of(t))  # restack plans it
+                continue
             if not plan:
-                deferred.append({"id": t["id"], "ref": t["ref"], "reason": "planner failed; run it again"})
-            elif not plan["feasible"]:
-                needs_human.append({"id": t["id"], "ref": t["ref"], "name": t["name"], "question": plan.get("question") or plan["summary"]})
+                defer(t, "planner failed; run it again")
+                continue
+            if not plan["feasible"]:
+                human(t, plan.get("question") or plan["summary"])
+                continue
+            mine = claims(plan, exclusive)
+            clashes = [c for c in sorted(mine) if c in taken]
+            if clashes and self.stacking:
+                hold(t, plan, {taken[c]["id"] for c in clashes})
+            elif clashes:
+                defer(t, f"overlaps {taken[clashes[0]]['ref']} on {place(clashes[0])}")
+            elif len(batch) >= self.parallel and self.stacking:
+                hold(t, plan, set())
             elif len(batch) >= self.parallel:
-                deferred.append({"id": t["id"], "ref": t["ref"], "reason": f"over maxParallel ({self.parallel})"})
+                defer(t, f"over maxParallel ({self.parallel})")
             else:
-                mine = claims(plan, exclusive)
-                clash = next((c for c in sorted(mine) if c in taken), None)
-                if clash:
-                    deferred.append({"id": t["id"], "ref": t["ref"], "reason": f"overlaps {taken[clash]} on {clash.split(':', 1)[1]}"})
-                    continue
                 for c in mine:
-                    taken[c] = t["ref"]
+                    taken[c] = t
                 batch.append((t, plan))
-        for d in deferred:
-            self.run.update(ticket=(d["id"], {"stage": "done", "status": "deferred", "why": d["reason"]}))
-        for n in needs_human:
-            self.run.update(ticket=(n["id"], {"stage": "done", "status": "needs-human", "why": n["question"]}))
         self.run.log("batch: " + (", ".join(t["ref"] for t, _ in batch) or "none"))
         if deferred:
             self.run.log("deferred: " + "; ".join(f"{d['ref']} ({d['reason']})" for d in deferred))
@@ -611,23 +752,94 @@ class Loop:
             self.run.log("needs a human: " + ", ".join(n["ref"] for n in needs_human))
 
         if self.run.plan_only:
-            for t, _ in batch:
+            for t in [t for t, _ in batch] + [w["t"] for w in later]:
                 self.run.update(ticket=(t["id"], {"stage": "planned", "status": "planned"}))
             summary = {"stoppedAfter": "plan", "plans": [{"id": t["id"], "ref": t["ref"], **plan} for t, plan in batch],
+                       "waiting": [{"id": w["t"]["id"], "ref": w["t"]["ref"], "waitsFor": sorted(w["on"])} for w in later],
                        "deferred": deferred, "needsHuman": needs_human}
-        else:
-            with ThreadPoolExecutor(self.parallel) as pool:
-                done = list(pool.map(lambda tp: self.chain(*tp), batch))
-            summary = {
-                "ready": [{"id": r["t"]["id"], "ref": r["t"]["ref"], "name": r["t"]["name"], "branch": r["t"]["branch"],
-                           "rounds": r["rounds"], "risk": "high" if (r.get("review") or {}).get("sensitive") else "normal",
-                           "preExisting": len(r.get("preExisting") or []),
-                           **{k: r["handoff"].get(k) for k in ("commitMessage", "prTitle", "prChanges")}}
-                          for r in done if r["status"] == "ready"],
-                "needsHuman": needs_human + [{"id": r["t"]["id"], "ref": r["t"]["ref"], "name": r["t"]["name"], "question": r["why"]}
-                                             for r in done if r["status"] != "ready"],
-                "deferred": deferred,
-            }
+            self.run.update(summary=summary, finished=now())
+            self.run.log(f"run {self.run.id} finished")
+            return summary
+
+        # Tickets run with no barrier between them. Each time one finishes, the tickets that waited
+        # for it wake: moved onto its commit, planned on the new code, and started unless they
+        # now overlap another running ticket.
+        results = {n["id"]: {"status": "needs-human"} for n in needs_human}  # id -> the finished ticket's result
+        results.update({d["id"]: {"status": "deferred"} for d in deferred})
+        order: list[str] = []        # ids in the order they finished
+        holding: dict = {}           # claim -> the running ticket that holds it
+        running: dict = {}           # future -> (ticket, its claims)
+        stacks: dict = {}            # id -> how many times it was moved onto other tickets
+
+        with ThreadPoolExecutor(self.parallel) as pool:
+            def start(t: dict, plan: dict) -> None:
+                mine = claims(plan, exclusive)
+                for c in mine:
+                    holding[c] = t
+                running[pool.submit(self.chain, t, plan)] = (t, mine)
+
+            def wake() -> None:
+                for w in list(later):
+                    if len(running) >= self.parallel:
+                        break
+                    if not all(i in results for i in w["on"]):
+                        continue
+                    later.remove(w)
+                    t, plan = w["t"], w["plan"]
+                    failed = {i for i in w["on"] if results[i]["status"] != "ready"}
+                    if failed:
+                        results[t["id"]] = {"status": "deferred"}
+                        defer(t, f"waits on {names(failed)}, which did not finish ready")
+                        continue
+                    if w["on"]:
+                        n = stacks[t["id"]] = stacks.get(t["id"], 0) + 1
+                        t, plan, why = self.restack(t, w["on"], order, n)
+                        if why:
+                            results[t["id"]] = {"status": "needs-human"}
+                            human(t, why)
+                            continue
+                    clashes = [c for c in sorted(claims(plan, exclusive)) if c in holding]
+                    if clashes:
+                        self.run.log(f"{t['ref']}: overlaps a running ticket on {place(clashes[0])}")
+                        hold(t, plan, {holding[c]["id"] for c in clashes})
+                        continue
+                    start(t, plan)
+
+            for t, plan in batch:
+                start(t, plan)
+            wake()
+            while running:
+                for f in wait(running, return_when=FIRST_COMPLETED)[0]:
+                    t, mine = running.pop(f)
+                    try:
+                        r = f.result()
+                    except Exception as e:  # noqa: BLE001 - one crashed ticket must not stop the others
+                        r = {"t": t, "status": "needs-human", "why": f"crashed: {e}", "rounds": 0, "handoff": {}}
+                        self.run.update(ticket=(t["id"], {"stage": "done", "status": r["status"], "why": r["why"]}))
+                        self.run.log(f"{t['ref']} crashed: {e}")
+                    results[t["id"]] = r
+                    order.append(t["id"])
+                    for c in mine:
+                        if holding.get(c) is t:
+                            del holding[c]
+                wake()
+        for w in later:
+            defer(w["t"], f"waits on {names(w['on'])}, which did not finish")
+
+        position = {t["id"]: i for i, t in enumerate(tickets)}
+        base = {t["id"]: t["base"] for t in self.run.tickets}  # a finished ticket may have been put on another since
+        done = sorted((r for r in results.values() if "t" in r), key=lambda r: position[r["t"]["id"]])
+        summary = {
+            "ready": [{"id": r["t"]["id"], "ref": r["t"]["ref"], "name": r["t"]["name"], "branch": r["t"]["branch"],
+                       "base": base.get(r["t"]["id"], r["t"]["base"]),
+                       "rounds": r["rounds"], "risk": "high" if (r.get("review") or {}).get("sensitive") else "normal",
+                       "preExisting": len(r.get("preExisting") or []),
+                       **{k: r["handoff"].get(k) for k in ("commitMessage", "prTitle", "prChanges")}}
+                      for r in done if r["status"] == "ready"],
+            "needsHuman": needs_human + [{"id": r["t"]["id"], "ref": r["t"]["ref"], "name": r["t"]["name"], "question": r["why"]}
+                                         for r in done if r["status"] != "ready"],
+            "deferred": deferred,
+        }
         self.run.update(summary=summary, finished=now())
         self.run.log(f"run {self.run.id} finished")
         return summary

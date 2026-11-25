@@ -46,7 +46,8 @@ function fake(prompt, opts) {
     const vote = label.split('·v')[1]
     return { verdict: scenario === 'risky' && vote === '3' ? 'refuted' : 'confirmed', severity: 'major', reason: 'looked' }
   }
-  if (kind === 'handoff') {
+  if (kind.startsWith('handoff')) {
+    if (scenario === 'nohandoff' && id === '1') return null
     return { summary: `Did ${id}.`, decisions: [], followUps: [], openFindings: [], commitMessage: `feat: ${id}`, prTitle: `T${id}`, prChanges: ['x'], testing: 't', risk: 'r', revert: 'v' }
   }
   // a reviewer: <lens><round>

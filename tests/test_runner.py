@@ -1,4 +1,5 @@
-"""The sprint loop against a fake adapter: batching, the fix loop, resume, and the CLI end to end.
+"""The sprint loop against a fake adapter: batching, the fix loop, resume, the CLI end to end, and
+stacking during the sprint on real git repos.
 
     python3 -m unittest discover -s tests
 """
@@ -299,7 +300,8 @@ class RunCommandTest(unittest.TestCase):
         subprocess.run(["git", "clone", "-q", str(origin), str(self.clone)], check=True)
         state = self.clone / ".git" / "agent-loop"
         state.mkdir()
-        cfg = al.merged(al.DEFAULT_CONFIG, {"repo": "", "tracker": {"type": "file", "columns": {"ready": "Todo"}, "show": ["Todo"], "done": ["Done"]}})
+        cfg = al.merged(al.DEFAULT_CONFIG, {"repo": "", "commitAtHandoff": False,  # the fake adapter stages nothing to commit
+                                            "tracker": {"type": "file", "columns": {"ready": "Todo"}, "show": ["Todo"], "done": ["Done"]}})
         (state / "config.json").write_text(json.dumps(cfg))
         (state / "tickets.json").write_text(json.dumps([
             {"id": 1, "name": "One", "status": "Todo", "desc": "Do one."},
@@ -326,7 +328,7 @@ class RunCommandTest(unittest.TestCase):
         self.assertEqual([r["ref"] for r in summary["ready"]], ["#1"])          # #7 is blocked by #9, not run
         self.assertEqual(summary["needsHuman"][0]["ref"], "#6")
         self.assertTrue((self.tmp / "app-worktrees" / "1" / "a.py").is_file())
-        self.assertTrue((self.clone / ".git" / "agent-loop" / "handoffs" / "1.md").is_file())
+        self.assertNotIn("commit", al.read_handoff(self.clone / ".git" / "agent-loop" / "handoffs" / "1.md"))  # commitAtHandoff off
         status = io.StringIO()
         with redirect_stdout(status):
             al.main(["status"])
@@ -336,6 +338,176 @@ class RunCommandTest(unittest.TestCase):
             al.main(["move", "1", "Done"])
         tickets = json.loads((self.clone / ".git" / "agent-loop" / "tickets.json").read_text())
         self.assertEqual(tickets[0]["status"], "Done")
+
+
+def git(*args):
+    return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+class Stop(BaseException):
+    """The process dies in the middle of a run."""
+
+
+class GitAdapter:
+    """Every ticket passes review. The implementer writes the ticket's files and stages them.
+
+    files   what each ticket's plan claims (default: its own `t<id>.py`)
+    edits   what its implementer writes (default: `t<id>.py`)
+    stuck   tickets whose implementer gives up
+    stop    (ticket, label): the run dies in that call
+    """
+
+    def __init__(self, files=None, edits=None, stuck=(), stop=None, resolve=None):
+        self.files, self.edits, self.stuck, self.stop, self.resolve = files or {}, edits or {}, stuck, stop, resolve or {}
+        self.calls, self.saw = [], {}
+
+    def __call__(self, *, tool, prompt, schema, cwd, mode, log_path, **_):
+        tid, label = Path(log_path).name.split(".")[:2]
+        self.calls.append((tid, label))
+        if (tid, label) == self.stop:
+            raise Stop()
+        if label.startswith("plan"):
+            return {"feasible": True, "question": None, "summary": "s", "files": self.files.get(tid, [f"t{tid}.py"]), "steps": [],
+                    "risks": [], "planMarkdown": f"# Plan for {tid}\n", "knowledge": []}
+        if label == "implement":
+            if tid in self.stuck:
+                return {"summary": "", "checks": [], "stuck": "the API is not there"}
+            self.saw[tid] = sorted(f.name for f in Path(cwd).glob("*.py"))  # the code it builds on
+            for name, text in self.edits.get(tid, {f"t{tid}.py": f"y = {tid}\n"}).items():
+                (Path(cwd) / name).write_text(text)
+            git("-C", str(cwd), "add", "-A")
+            return {"summary": "ok", "checks": [], "stuck": None}
+        if label.startswith("resolve"):
+            for name, text in self.resolve.items():
+                (Path(cwd) / name).write_text(text)
+            git("-C", str(cwd), "add", "-A")
+            return {"summary": "combined", "checks": [], "stuck": None, "responses": []}
+        if label.startswith("review"):
+            return {"findings": []}
+        if label == "handoff":
+            return {"summary": f"Did {tid}.", "decisions": [], "followUps": [], "openFindings": [],
+                    "commitMessage": f"feat: ticket {tid}", "prTitle": f"Ticket {tid}", "prChanges": []}
+        raise AssertionError(label)
+
+
+class StackingRunTest(unittest.TestCase):
+    """`agentloop.py run` with the handoff commit: waiting tickets stack on the finished ones."""
+
+    TICKETS = [{"id": 1, "name": "One", "status": "Todo"},
+               {"id": 2, "name": "Two", "status": "Todo", "blockers": [1]},
+               {"id": 3, "name": "Three", "status": "Todo"}]
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        seed, origin, self.clone = self.tmp / "seed", self.tmp / "origin.git", self.tmp / "app"
+        git("init", "-q", "-b", "main", str(seed))
+        (seed / "a.py").write_text("x = 0\n")
+        git("-C", str(seed), "add", "-A")
+        git("-C", str(seed), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-qm", "i")
+        git("clone", "-q", "--bare", str(seed), str(origin))
+        git("clone", "-q", str(origin), str(self.clone))
+        for key, value in (("user.name", "t"), ("user.email", "t@t"), ("commit.gpgsign", "false")):
+            git("-C", str(self.clone), "config", key, value)
+        self.state = self.clone / ".git" / "agent-loop"
+        self.state.mkdir()
+        self.configure()
+        self.cwd = os.getcwd()
+        os.chdir(self.clone)
+        import adapters
+        self.adapters, self._orig = adapters, adapters.run_agent
+
+    def tearDown(self):
+        self.adapters.run_agent = self._orig
+        os.chdir(self.cwd)
+
+    def configure(self, tickets=None, **cfg):
+        cfg = al.merged(al.DEFAULT_CONFIG, {"repo": "", "tracker": {"type": "file", "columns": {"ready": "Todo"}, "show": ["Todo"],
+                                                                    "done": ["Done"]}, **cfg})
+        (self.state / "config.json").write_text(json.dumps(cfg))
+        (self.state / "tickets.json").write_text(json.dumps(tickets or self.TICKETS))
+
+    def run_cli(self, adapter, *argv):
+        self.adapters.run_agent = adapter
+        out = io.StringIO()
+        with redirect_stdout(out):
+            al.main(["run", *argv])
+        printed = out.getvalue()
+        return json.loads(printed[printed.index('{\n  "run"'):])
+
+    def rev(self, name):
+        return git("-C", str(self.clone), "rev-parse", name)
+
+    def note(self, tid):
+        return al.read_handoff(self.state / "handoffs" / f"{tid}.md")
+
+    def test_waiting_tickets_build_on_the_finished_ones_commit(self):
+        """#2 waits for #1 by the tracker, #3 because it overlaps #1's files. #5 waits for #4,
+        whose handoff commit a hook refuses."""
+        self.configure(self.TICKETS + [{"id": 4, "name": "Four", "status": "Todo"},
+                                       {"id": 5, "name": "Five", "status": "Todo", "blockers": [4]}])
+        hook = Path(git("-C", str(self.clone), "rev-parse", "--path-format=absolute", "--git-common-dir")) / "hooks" / "commit-msg"
+        hook.write_text("#!/bin/sh\nif grep -q 'ticket 4' \"$1\"; then echo 'lint says no' >&2; exit 1; fi\n")
+        hook.chmod(0o755)
+        fake = GitAdapter(files={"1": ["a.py"], "3": ["a.py"]})
+        summary = self.run_cli(fake)
+        self.assertEqual({r["ref"]: r["base"] for r in summary["ready"]},
+                         {"#1": "origin/main", "#2": "feat/1-one", "#3": "feat/1-one"})
+        self.assertEqual([(n["ref"], n["question"]) for n in summary["needsHuman"]], [("#4", "the handoff commit failed: lint says no")])
+        self.assertEqual(self.note("4")["status"], "needs-human")
+        self.assertEqual(summary["deferred"], [{"id": "5", "ref": "#5", "reason": "waits on #4, which did not finish ready"}])
+        self.assertNotIn("5", {tid for tid, _ in fake.calls})      # a ticket the tracker holds back is not planned on the trunk
+        self.assertNotIn(("2", "plan"), fake.calls)
+        self.assertIn(("3", "plan"), fake.calls)                   # an overlap is only found by planning
+        for tid, branch in (("2", "feat/2-two"), ("3", "feat/3-three")):
+            self.assertEqual(self.rev(branch + "^"), self.rev("feat/1-one"))
+            self.assertIn("t1.py", fake.saw[tid])                   # it was built on #1's code
+            self.assertIn((tid, "plan2"), fake.calls)               # and planned there
+            self.assertLess(fake.calls.index(("1", "handoff")), fake.calls.index((tid, "implement")))
+            note = self.note(tid)
+            self.assertEqual((note["status"], note["base"], note["commit"]), ("ready", "feat/1-one", self.rev(branch)))
+        self.assertEqual(git("-C", str(self.clone), "log", "-1", "--format=%s", "feat/3-three"), "feat: ticket 3")
+        state = json.loads((self.state / "runs" / summary["run"] / "run.json").read_text())
+        self.assertEqual(state["tickets"]["3"]["commit"], self.rev("feat/3-three"))
+
+    def test_two_blockers_are_put_in_a_line_and_a_conflict_goes_to_a_resolve_agent(self):
+        self.configure([{"id": 1, "name": "One", "status": "Todo"}, {"id": 3, "name": "Three", "status": "Todo"},
+                        {"id": 2, "name": "Two", "status": "Todo", "blockers": [1, 3]}])
+        # #1 and #3 both change a.py, which neither plan named, so they ran side by side
+        fake = GitAdapter(edits={"1": {"a.py": "x = 1\n", "t1.py": "y = 1\n"}, "3": {"a.py": "x = 3\n", "t3.py": "y = 3\n"}},
+                          resolve={"a.py": "x = 1\nz = 3\n"})
+        summary = self.run_cli(fake)
+        self.assertEqual(sorted(r["ref"] for r in summary["ready"]), ["#1", "#2", "#3"])
+        resolved = [c for c in fake.calls if c[1].startswith("resolve")]
+        self.assertEqual(len(resolved), 1)
+        moved = resolved[0][0]
+        self.assertEqual(resolved[0][1], "resolve1")
+        self.assertEqual((self.tmp / "app-worktrees" / "2" / "a.py").read_text(), "x = 1\nz = 3\n")
+        self.assertIn("during the sprint", self.note(moved)["resolved"])
+        state = json.loads((self.state / "runs" / summary["run"] / "run.json").read_text())
+        self.assertEqual((state["tickets"][moved]["stage"], state["tickets"][moved]["status"]), ("done", "ready"))
+        # a resumed run replays the handoffs and keeps the note for the ship skill
+        self.run_cli(GitAdapter(stop=("x", "x")), "--resume", summary["run"])
+        self.assertIn("during the sprint", self.note(moved)["resolved"])
+
+    def test_resume_after_a_stop_in_the_middle(self):
+        with self.assertRaises(Stop), redirect_stdout(io.StringIO()):
+            self.adapters.run_agent = GitAdapter(stop=("2", "implement"))
+            al.main(["run", "1", "2"])
+        run_id = sorted(p.name for p in (self.state / "runs").iterdir())[-1]
+        one = self.rev("feat/1-one")
+        self.assertEqual(self.rev("feat/2-two"), one)               # moved onto #1, nothing built yet
+        fake = GitAdapter()
+        summary = self.run_cli(fake, "--resume", run_id)
+        self.assertEqual([(r["ref"], r["base"]) for r in summary["ready"]], [("#1", "origin/main"), ("#2", "feat/1-one")])
+        self.assertEqual(self.rev("feat/1-one"), one)               # #1 keeps its commit
+        self.assertEqual(self.rev("feat/2-two^"), one)
+        self.assertEqual([c for c in fake.calls if c[0] == "1"], [])
+        self.assertEqual([label for tid, label in fake.calls if tid == "2"][0], "implement")  # its plan was kept
+        # a second resume, of a finished run, calls no agent and changes no branch
+        two = self.rev("feat/2-two")
+        again = self.run_cli(GitAdapter(stop=("x", "x")), "--resume", run_id)
+        self.assertEqual(again["ready"], summary["ready"])
+        self.assertEqual((self.rev("feat/1-one"), self.rev("feat/2-two")), (one, two))
 
 
 if __name__ == "__main__":

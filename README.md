@@ -153,8 +153,10 @@ A ticket in the Ready column is **ready** when these conditions are true:
 - It has no worktree with work in it and no open pull request.
 - All its blockers are done, closed, archived or merged.
 
-If one blocker has an open pull request, the ticket can start on the branch of that pull
-request.
+If every open blocker has an open pull request, and those pull requests are in one stack, the
+ticket starts on the top branch of that stack. So it also has the pull requests that are stacked
+above its blockers. A blocker with no pull request blocks the ticket. Blockers in two separate
+stacks block it too, and the reason names the top branch of each stack.
 
 agent-loop reads the blockers from Jira links and GitHub issue dependencies. On other trackers,
 it reads `#123` references below a `Blockers` heading, or after "Blocked by" or "Depends on".
@@ -165,25 +167,35 @@ ticket for a later run and tells you why.
 
 ## Waiting tickets and stacked branches
 
-With `commitAtHandoff` on (the default) in a Claude Code Workflow run, a ticket that cannot start
-yet waits in the same run instead of stopping:
+With `commitAtHandoff` on (the default), a ticket that cannot start yet waits in the same run
+instead of stopping. This works the same in a Claude Code Workflow run and in `agentloop.py run`
+(Codex, Cursor, a terminal):
 
 - it overlaps a running ticket's files, or its tracker says another ticket of this run blocks it;
 - when that ticket is ready, a Python step has committed it on its branch (locally, not pushed);
-- `wf stack` moves the waiting ticket onto that commit, a planner plans it again on the new code,
-  and it starts. If it now overlaps another running ticket, it waits again and stacks on that one.
+- a stack step (`wf stack` in a Workflow run) moves the waiting ticket onto that commit, a planner
+  plans it on the new code, and it starts. If it now overlaps another running ticket, it waits
+  again and stacks on that one.
+
+A ticket its tracker says waits is not planned before that: a plan made on the trunk, without the
+code it builds on, would be thrown away. A ticket that waits because of an overlap was planned
+first, since its plan's file list is how the overlap is found.
 
 The result is a stack of branches, for example `#856 → #841 → #842`. The ship skill pushes them in
 order and opens each PR against the branch below it.
 
-When a ticket needs two tickets that are on separate branches, `wf stack` first puts one on top of
-the other, in its own worktree, then moves the waiting ticket onto the top one. A conflict or a
-failing check there goes to a resolve agent, and the ship skill runs the combine review on what that agent changed. A
-branch that another ticket of the run builds on is never moved.
+When a ticket needs two tickets that are on separate branches, the stack step first puts one on
+top of the other, in its own worktree, then moves the waiting ticket onto the top one. A conflict
+or a failing check there goes to a resolve agent, and the ship skill runs the combine review on
+what that agent changed. A branch that another ticket of the run builds on is never moved.
 
-A ticket stops as *needs you* when its blocker did not finish ready, or when its blockers cannot be
-put in a line. With `commitAtHandoff` off, the loop commits nothing, and an
-overlapping ticket waits for the next run.
+A ticket waits in a run only when each of its blockers is prepared in that run or has a pull
+request in the one stack it starts on. When a blocker is skipped (it is blocked itself, or its
+setup failed), the ticket is skipped too, and the reason names that blocker.
+
+A waiting ticket is deferred to the next run when its blocker did not finish ready. It stops as
+*needs you* when its blockers cannot be put in a line. With `commitAtHandoff` off, the loop
+commits nothing, and an overlapping ticket waits for the next run.
 
 The commit at handoff is made by `agentloop.py`, not by an agent, with your git identity, signing
 and commit hooks. If a hook fails, the ticket needs you. Push and pull requests still wait for your
@@ -217,6 +229,17 @@ A stopped ticket stops its stack there. Nothing in that stack is published until
 ship offers to publish only the tickets below it if you ask. The next ship starts from the
 beginning: tickets already on the one below do not move, and the fixed ticket is checked again.
 `git -C <worktree> reflog` takes a branch back to before a ship.
+
+You can rebase a ready ticket onto another branch by hand before you ship, for example onto one of
+your open pull requests. Ship reads where each branch sits from git, not from the handoff note. It
+tells you when the two differ, and it corrects the note. It also sets the ticket's risk from what
+the ticket changes on top of its parent. If the ticket sits on a branch that has no pull request
+and no ready ticket, ship stops and names that branch. It never squashes another branch's commits
+into the ticket.
+
+If you changed the branch of an open pull request below a ticket and did not push it, ship stops
+and gives you the push command. It does not move the ticket back onto the pushed copy. A ticket
+that you ran again for review feedback ships again into its open pull request.
 
 With the GitHub CLI extension [`gh stack`](https://gh.io/stacks) (`pr.ghStack`, on by default), ship
 links the pull requests into a stack on GitHub with `gh stack link`. Without it, the pull requests

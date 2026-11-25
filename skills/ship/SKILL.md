@@ -28,6 +28,11 @@ $AL show-config                # repo, pr.template, pr.ticketLine, pr.draft, dir
 $AL stack plan [ids...]        # the ids the user gave, else every ready ticket; changes nothing
 ```
 
+A handoff note's `base:` is what the loop wrote. Ship reads where each branch sits now from git,
+because the user may have rebased a ticket onto another branch since. When the two differ, ship
+uses git, and `warnings` says so ("its handoff says base `main`, but its branch sits on …").
+Report that line. `stack build` then corrects the note. Do not ask the user to edit the note.
+
 If `squash` in its output lists tickets, warn the user before anything changes, for each one:
 "<ref> has <commits> commits in its worktree. To go into the PR stack, agent-loop squashes them
 into one commit named after the handoff commit message (the other commit subjects go in its
@@ -64,6 +69,17 @@ in its `worktree`:
   Rebase it onto its `parent` by hand, resolve the conflicts and finish the rebase.
 - failing checks: the branch is left rebased, with the conflicts resolved. Fix the problem and
   `git add` the fix; ship puts it into the ticket's one commit.
+- the branch below it has local commits that are not on origin: the user changed the branch of an
+  open pull request and did not push it. Ship pushes only the tickets it ships. Give the user the
+  push command from the `reason`. Do not push that branch yourself without asking.
+- its commits include another branch: the ticket sits on a branch that has no pull request and
+  no ready ticket, so ship does not know it. Those commits are that branch's work. Never suggest
+  squashing them or resetting the ticket to the trunk. Give the user the `reason`, which names
+  the branch and the two ways forward.
+
+When a ticket has more commits than its handoff describes, first look at what is under it
+(`git -C <worktree> log --oneline --decorate <parent>..HEAD`). Commits that carry another branch's
+name are a stack under the ticket, not noise in its history.
 
 If something went wrong, the user can go back: `git -C <worktree> reflog` lists the earlier
 states of the branch, and `git -C <worktree> reset --hard <commit>` returns to one. The `reason`

@@ -79,16 +79,69 @@ NO_EDITOR = {"GIT_EDITOR": "true", "GIT_SEQUENCE_EDITOR": "true"}
 def own_commits(wt: str | Path, t: dict, onto: str = "") -> list[str] | None:
     """A ticket's own commits, oldest first: its handoff `commit:` and every commit after it.
     When the developer rebased it by hand, that commit is gone: then they are the commits on top
-    of `onto`, if it sits on it. [] when it has none yet (staged only); None when unknown."""
+    of `onto`, if it sits on it, else on top of the branch it does sit on. [] when it has none yet
+    (staged only); None when unknown."""
     c = t.get("commit") or ""
     if not c:
         return []
     if rev(wt, c) and is_ancestor(wt, c, "HEAD"):
         return out(wt, "rev-list", "--reverse", "--first-parent", f"{c}^..HEAD").splitlines() or None
-    onto_commit = rev(wt, onto) if onto else ""
-    if onto_commit and is_ancestor(wt, onto_commit, "HEAD"):
-        return out(wt, "rev-list", "--reverse", "--first-parent", f"{onto_commit}..HEAD").splitlines() or None
+    for below in (onto, t.get("sitsOn") or ""):  # `sitsOn`: the branch ship found under it (`sits_on`)
+        commit = rev(wt, below) if below else ""
+        if commit and is_ancestor(wt, commit, "HEAD"):
+            return out(wt, "rev-list", "--reverse", "--first-parent", f"{commit}..HEAD").splitlines() or None
     return None
+
+
+BRANCH_REFS = ("refs/heads", "refs/remotes/origin")
+
+
+def sits_on(wt: str | Path, branches: list[str], trunk: str, noted: str = "", own: str = "") -> str:
+    """The ref a ticket's branch really sits on, read from git: of `branches`, the one whose tip is
+    in HEAD's history and closest to HEAD (`origin/<name>`, or the local `<name>`), else `trunk`.
+    On a tie the earlier of `branches` wins.
+
+    A handoff's `base:` (`noted`) is what the loop wrote; a developer may have rebased the ticket
+    since, and an older loop wrote the trunk for a ticket that sat on another branch. So git wins,
+    with one exception: a noted branch that is no longer in HEAD's history changed after the
+    ticket was built on it (it was amended, or rebased itself). The ticket still belongs on it,
+    unless it sits exactly on another branch's tip.
+
+    A branch whose tip is already in the trunk is not a stack to build on. `own` is the ticket's
+    first commit, when known: a branch that contains it is above the ticket, not below it."""
+    own = own if own and rev(wt, own) and is_ancestor(wt, own, "HEAD") else ""
+    below = set(out(wt, "for-each-ref", "--format=%(refname)", "--merged", "HEAD", "--no-merged", trunk,
+                    *(("--no-contains", own) if own else ()), *BRANCH_REFS).splitlines())
+
+    def refs(name: str) -> list[tuple[str, str]]:
+        short = trunk_of(name)
+        return [(f"refs/remotes/origin/{short}", f"origin/{short}"), (f"refs/heads/{short}", short)]
+
+    noted = "" if trunk_of(noted) == trunk_of(trunk) else noted
+    names = list(dict.fromkeys(([trunk_of(noted)] if noted else []) + [trunk_of(b) for b in branches]))
+    found = [(full, shown) for name in names for full, shown in refs(name) if full in below]
+    have = [(full, shown) for full, shown in refs(noted) if rev(wt, full)] if noted else []
+    if have and not any(is_ancestor(wt, full, "HEAD") for full, _ in have):
+        # The noted branch moved: only a branch whose tip the ticket sits on exactly replaces it.
+        under = rev(wt, f"{own}^") if own else ""
+        return next((shown for full, shown in found if under and rev(wt, full) == under), have[0][1])
+    best, fewest = trunk, None
+    for full, shown in found:
+        n = int(out(wt, "rev-list", "--count", f"{full}..HEAD") or 0)
+        if fewest is None or n < fewest:
+            best, fewest = shown, n
+    return best
+
+
+def refs_inside(wt: str | Path, below: str, branch: str) -> list[str]:
+    """Other branches whose tips lie above `below` and under HEAD, bottom to top: the commits up
+    to them are theirs, not this branch's."""
+    head = rev(wt, "HEAD")
+    lines = out(wt, "for-each-ref", "--format=%(objectname) %(refname:short)", "--merged", "HEAD", "--no-merged", below,
+                *BRANCH_REFS).splitlines()
+    names = {name for sha, name in (line.split(" ", 1) for line in lines)
+             if sha != head and name not in (branch, f"origin/{branch}", "origin", "origin/HEAD")}
+    return sorted(names, key=lambda name: (-int(out(wt, "rev-list", "--count", f"{name}..HEAD") or 0), name))
 
 
 # --- handoff notes -------------------------------------------------------------
@@ -165,13 +218,17 @@ def plan(tickets: list[dict], trunk: str, mode: str, prs: list[dict], me: str, l
     (`own`), or someone else's branch (`foreign`: kept as it is, never joined to their stack).
     `parent` is each ticket's PR base; `rebase` says whether its branch must move onto it."""
     by_head = {p["headRefName"]: p for p in prs}
+    # A ticket that ships again has an open PR itself (it was run again for review feedback). That
+    # PR is not part of the stack below it: counted in, the ticket would go on top of itself.
+    shipping = {t["branch"] for t in tickets}
+    below = [p for p in prs if p["headRefName"] not in shipping]
     groups: dict[str, dict] = {}
     for tree in linearize(tickets):
         root = tree[0]
         base = root.get("base") or trunk
         pr = by_head.get(base) if base != trunk else None
         if pr and (pr.get("author") or {}).get("login") == me and me:
-            existing = chain_of(prs, pr, trunk)
+            existing = chain_of(below, pr, trunk)
             key = f"own:{existing[0]['number']}"
             anchor = {"kind": "own", "branch": existing[-1]["headRefName"], "prs": [p["number"] for p in existing]}
         elif pr:
@@ -224,6 +281,13 @@ def onto_for(t: dict, trunk: str, anchor: dict) -> str:
     if anchor["kind"] != "foreign":
         return onto_ref(wt, parent, trunk, anchor)
     return parent if rev(wt, f"refs/heads/{parent}") else f"origin/{parent}"
+
+
+def unpushed(wt: str | Path, branch: str) -> int:
+    """How many commits the local `branch` has that `origin/<branch>` lacks. 0 when either is missing."""
+    if not rev(wt, f"refs/heads/{branch}") or not rev(wt, f"refs/remotes/origin/{branch}"):
+        return 0
+    return int(out(wt, "rev-list", "--count", f"refs/remotes/origin/{branch}..refs/heads/{branch}") or 0)
 
 
 RESOLVE_SCHEMA = runner.SCHEMAS["build"]
@@ -304,6 +368,23 @@ class Builder:
                 drop_meta(Path(t["path"]), key)
             else:
                 set_meta(Path(t["path"]), key, value)
+
+    def risk(self, t: dict, onto: str) -> None:
+        """Set the ticket's risk from what it changes on top of `onto`. The loop matched the
+        sensitive paths against its diff from the base it had then; the ticket may sit on another
+        branch now, and that branch's files are not this ticket's risk."""
+        changed = out(t["worktree"], "diff", "--name-only", f"{onto}...HEAD").splitlines()
+        hits = ", ".join(runner.sensitive_matches(changed, self.cfg.get("sensitivePaths") or []))
+        risk = "high" if hits else "normal"
+        if (t.get("risk") or "normal", t.get("sensitive") or "") == (risk, hits):
+            return
+        t["risk"] = risk
+        self.note(t, "risk", risk)
+        self.note(t, "sensitive", hits or None)
+        if hits:
+            t["sensitive"] = hits
+        else:
+            t.pop("sensitive", None)
 
     def remembered_findings(self, t: dict, head: str) -> list[dict]:
         """Combine findings saved for this commit. A different commit clears them: the user amended."""
@@ -391,6 +472,13 @@ class Builder:
             return [], (f"its handoff commit {t.get('commit', '')[:12]} is no longer on its branch, and the branch does "
                         f"not sit on {onto}, so its own commits are unknown. Rebase it onto {onto} by hand and run ship again.")
         if own and own[0] != t.get("commit"):  # rebased by hand: its first own commit is the new handoff commit
+            theirs = refs_inside(wt, f"{own[0]}^", t["branch"])
+            if theirs:  # not its own commits: squashing or moving them would rewrite another branch's work
+                names = ", ".join(f"`{b}`" for b in dict.fromkeys(trunk_of(x) for x in theirs))
+                return [], (f"it was rebased by hand, and the {len(own)} commits under its tip include the branch {names}: "
+                            f"it sits on that branch, not on {onto}. Ship does not squash or move another branch's "
+                            "commits. Open that branch's pull request or ship its ticket first, or move this ticket: "
+                            f"`git -C {wt} rebase --onto {onto} {theirs[-1]}`. Then run ship again.")
             t["commit"] = own[0]
             t["handRebased"] = True  # its checks run again
             self.note(t, "commit", own[0])
@@ -483,18 +571,28 @@ class Builder:
         for s in stacks:
             stopped = None
             prev = ""
+            mine = {self.trunk} | {t["branch"] for t in s["tickets"]}
             for t in s["tickets"]:
                 if stopped:
                     t.update(status="waiting", reason=f"waits for {self.ref(stopped)}")
                     continue
                 wt = t["worktree"]
                 onto = onto_for(t, self.trunk, s["anchor"])
-                if t["rebase"]:
+                ahead = 0 if t["parent"] in mine else unpushed(wt, t["parent"])
+                if ahead:
+                    r = {"status": "stopped", "reason": (
+                        f"it builds on `{t['parent']}`, and `{t['parent']}` has {ahead} local commit(s) that are not on "
+                        "origin. Its pull request can only build on what GitHub has, and ship pushes only the tickets it "
+                        f"ships. Push that branch first: `git -C {wt} push --force-with-lease origin {t['parent']}`. If "
+                        f"origin is the newer one, bring the local branch up to date instead. Then run ship again.")}
+                elif t["rebase"]:
                     r = self.ticket(t, onto, prev)
                 else:
                     error = self.commit_staged(t) if Path(wt).is_dir() else f"the worktree {wt} is gone"
                     r = {"status": "stopped", "reason": f"the commit failed: {error}"} if error else {"status": "built"}
                 t.update(r)
+                if r["status"] == "built" and Path(wt).is_dir():
+                    self.risk(t, onto)
                 t["commit"] = out(wt, "rev-parse", "HEAD") if Path(wt).is_dir() else ""
                 t["stat"] = out(wt, "diff", "--stat", onto, "HEAD") if Path(wt).is_dir() else ""
                 if r["status"] != "built":
