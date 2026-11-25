@@ -1,16 +1,26 @@
 # agent-loop
 
-agent-loop lets coding agents do the routine part of a sprint, so that you do not have to explain
-the project in each session or move work from one agent to the next.
+Run your sprint's tickets in parallel with Claude Code. Each ticket is planned, built, checked by
+independent reviewers and fixed until they agree. You only approve the pull requests.
 
 - **Each session starts with a brief:** the board, the sprint goal, the decisions, the project
   knowledge, the open pull requests and the notes of earlier agents.
 - **The loop does the tickets in parallel:** plan, implement, review, fix. Each ticket has its own
-  git worktree.
-- **You approve and merge.** The runner may commit locally at handoff; agents do not push or merge.
+  git worktree. Tickets that depend on each other wait, then build on the finished one.
+- **Review that converges:** your checks run first, then spec, correctness and standards
+  reviewers, and a skeptic for each blocking finding. A fix round re-reviews only what the fix
+  changed.
+- **You approve and merge.** Nothing is pushed until you approve the exact push and pull request
+  commands, once, in the ship skill. Nothing is merged by an agent.
 
-It works with **Claude Code**, **Codex** and **Cursor**, and you can use a different tool for each
-stage. Trackers: Trello, GitHub Projects, Jira or a local `tickets.json` file. Repositories: GitHub.
+**Cost:** a normal ticket takes about 6 to 8 agent calls, and each fix round about 4 to 5 more
+(see [Permissions and cost](#permissions-and-cost)).
+
+Trackers: Trello, GitHub Projects, Jira or a local `tickets.json` file. Repositories: GitHub. It
+also runs on Codex and Cursor ([experimental](#also-runs-on-codex-and-cursor-experimental)).
+
+**Before 1.0**, configuration keys can change between minor versions. The
+[changelog](CHANGELOG.md) says how to update.
 
 ## How it works
 
@@ -29,6 +39,19 @@ ship ──► stack, resolve conflicts (local) ──► you approve ──► 
 With `commitAtHandoff` on (the default), each ready ticket is committed locally at handoff. Push and
 pull requests wait for your approval in the ship skill. With it off, the changes stay staged until
 ship.
+
+## Try it first
+
+No board or credentials needed. In Claude Code:
+
+```
+/plugin marketplace add Juraj-Sulimanovic/agent-loop
+/plugin install agent-loop@agent-loop
+```
+
+Then, in a session in any GitHub repository: run `/agent-loop:setup` and pick **File (no board
+yet)**, ask the session to add two small tickets to `tickets.json` in the agent-loop folder, and
+run `/agent-loop:sprint`. `/agent-loop:status` shows the result; nothing is pushed.
 
 ## Quick start
 
@@ -56,14 +79,19 @@ Code shows its own progress view (`/workflows`): the phases, each agent with its
 and time, the arrow keys to look inside, and the keys to stop or pause.
 
 The workflow also writes a line to that view at each stage boundary, for example
-`#824: checks 1 passing`, `#824: review · 1 blocking, 2 minor`, `#824: ready to ship`.
+`#12: checks 1 passing`, `#12: review · 1 blocking, 2 minor`, `#12: ready to ship`.
 
 The optional `agent-loop-panel` adds a band above the prompt with what each ticket does now. For a
 Workflow run it reads the transcripts that Claude Code keeps for each agent, so it costs no tokens:
 the running agents, the last tool call (for example `Edit runs.py · 20s ago`) and the size of the
 change so far. It shows runs of the Python runner too. `/agent-loop-panel` opens its full pane.
 
-### Codex
+### Also runs on Codex and Cursor (experimental)
+
+Claude Code is the tested path. The same skills run on Codex and Cursor through the Python runner,
+without the Workflow view or stacking in the same run.
+
+#### Codex
 
 ```bash
 codex plugin marketplace add Juraj-Sulimanovic/agent-loop
@@ -72,7 +100,7 @@ codex plugin add agent-loop@agent-loop
 
 Approve the session hook of the plugin one time, in `/hooks`.
 
-### Cursor
+#### Cursor
 
 ```bash
 git clone https://github.com/Juraj-Sulimanovic/agent-loop ~/.cursor/plugins/local/agent-loop
@@ -173,7 +201,7 @@ yet waits in the same run instead of stopping:
 - `wf stack` moves the waiting ticket onto that commit, a planner plans it again on the new code,
   and it starts. If it now overlaps another running ticket, it waits again and stacks on that one.
 
-The result is a stack of branches, for example `#856 → #841 → #842`. The ship skill pushes them in
+The result is a stack of branches, for example `#21 → #22 → #23`. The ship skill pushes them in
 order and opens each PR against the branch below it.
 
 When a ticket needs two tickets that are on separate branches, `wf stack` first puts one on top of
@@ -350,6 +378,9 @@ python3 -m unittest discover -s tests
 ```
 
 The tests need only Python and `git`. They do not call an agent tool.
+
+To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md). Report security problems privately: see
+[SECURITY.md](SECURITY.md).
 
 ## License
 

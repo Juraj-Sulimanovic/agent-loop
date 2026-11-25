@@ -1,0 +1,45 @@
+name: Bug report
+description: Something in agent-loop does not work as the README says.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Remove tokens, client data and private code** from everything you paste here: run folders,
+        prompts and handoff notes can contain them.
+  - type: input
+    id: version
+    attributes:
+      label: agent-loop version
+      description: The `version` in `.claude-plugin/plugin.json`, or the release you installed.
+      placeholder: 0.10.0
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Tool and version
+      description: Claude Code, Codex or Cursor, and its version (`claude --version`).
+      placeholder: Claude Code 2.x
+    validations:
+      required: true
+  - type: dropdown
+    id: tracker
+    attributes:
+      label: Tracker
+      options: [Trello, GitHub Projects, Jira, Local file, Not relevant]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: The lines that matter from the run folder (`log.txt`, the step's `.json` or `.log`), or the error text. Redacted.
+      render: text

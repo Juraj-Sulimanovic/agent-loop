@@ -1,14 +1,14 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "agent-loop",
-  "description": "Local marketplace for the agent-loop plugin",
+  "description": "agent-loop: a parallel plan, build, review and fix loop over your sprint's tickets, for Claude Code",
   "owner": {
     "name": "Juraj Sulimanović"
   },
   "plugins": [
     {
       "name": "agent-loop",
-      "description": "Project brief at session start, and a plan/implement/review/fix/ship loop over tickets in parallel worktrees, run by Claude Code, Codex or Cursor.",
+      "description": "Run your sprint's tickets in parallel: each ticket is planned, built, checked by independent reviewers and fixed until they agree, and you approve only the pull requests. Trello, Jira, GitHub Projects or a local file.",
       "source": "./"
     },
     {
